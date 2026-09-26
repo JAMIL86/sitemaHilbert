@@ -51,6 +51,52 @@
 3. **Sharpe/Sortino anualizam pela densidade real de trades** (`_periods_per_year`).
    Fixar 252×78 (um trade por barra) inflava o Sharpe em ordens de grandeza.
 
+**BUG DO EXIT LOGIC — causa raiz e correção (2026-09-26):**
+
+A primeira versão do engine reimplementava as saídas: SL fixo de 50 pontos +
+fechamento por "reversão de sinal". A reversão **nunca disparava** — o V26
+reemite a mesma direção enquanto há posição aberta, então só uma mudança real
+de lado fecharia o trade, e isso praticamente não acontecia.
+
+Sintoma medido: 23 trades, **0 vencedores**, 100% mortos no stop inicial.
+
+Causa raiz: a engine tratava a estratégia como emissora de *entradas* e
+inventava a política de *saída*. A API correta é
+`V26Strategy.manage_open_trade()` (`strategy/pdf_strategies.py`), que já
+implementa breakeven (+500 pts), parciais 30%/30%, trailing AGC e saída por
+inversão de fase 180°.
+
+Correção: o engine passou a delegar. Resultado medido: 41 trades, 16
+vencedores, 16 saídas por `TRAIL`. Nenhum take-profit foi inventado — o PDF
+declara "SEM Take Profit fixo".
+
+**ACHADO CRÍTICO PARA A AUDITORIA (não resolvido):**
+
+`sl_points` médio = **6,5** (unidades de preço) contra `inp_be_pts = 500`.
+A distância entre o breakeven e o stop típico é de ~77×. Consequência
+prática: o breakeven e as parciais **nunca disparam** em M5, e toda saída
+lucrativa depende exclusivamente do trailing stop.
+
+Hipóteses a verificar antes de qualquer ajuste (NÃO ajustar sem confirmar):
+(a) o PDF pode expressar "pontos" em unidades diferentes das que o MT5 usa
+para XAUUSD-VIP; (b) `inp_be_pts=500` pode ser um valor herdado de outro
+instrumento; (c) pode estar correto e o SL de ~6,5 é que está errado.
+
+**O BACKTEST ATUAL NÃO É CONCLUSIVO:**
+
+Rodou sobre **1 200 barras sintéticas** (`tests/test_backtest.py::_synthetic`,
+`rng = default_rng(7)`, vol 2,5 em torno de 2350). Resultado: PF 0.532,
+P&L −30,24 USD, win rate 39,0%, 41 trades.
+
+Esses números **não dizem nada sobre a borda da estratégia** — são
+artefatos de um processo aleatório sem estrutura de mercado (sem vol
+clustering, sem gaps de sessão, sem tendência persistente). FASE 2
+(walk-forward, out-of-sample, Monte Carlo) sobre dados sintéticos seria
+desperdício: mediria a consistência de um gerador de números, não do V26.
+
+**Próximo passo obrigatório:** baixar dados reais do MT5 (XAUUSD-VIP M5,
+6 meses), rodar o engine, e só então avaliar FASE 2.
+
 **Configuração GitHub (pendente):**
 - User: JAMIL86
 - Email: veloxbrcaldas@gmail.com
