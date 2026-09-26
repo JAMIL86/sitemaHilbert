@@ -27,6 +27,7 @@ TRADING:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -381,3 +382,59 @@ class BacktestEngine:
         for col in ("open", "high", "low", "close"):
             out[col] = out[col].astype("float64")
         return out.reset_index(drop=True)
+
+
+def main() -> int:
+    """CLI: roda o backtest sobre os dados baixados e grava o relatório."""
+    import argparse
+
+    from backtest.downloader import HistoricalDataDownloader
+    from backtest.metrics import compute_metrics
+    from backtest.report import save_report
+
+    parser = argparse.ArgumentParser(description="Backtest V26 sobre historico do MT5.")
+    parser.add_argument("--data", default=None, help="CSV local; sem ele usa backtest/data/*.csv")
+    parser.add_argument("--symbol", default="XAUUSD-VIP")
+    parser.add_argument("--balance", type=float, default=10_000.0)
+    parser.add_argument("--limit", type=int, default=0, help="Usa apenas as N barras mais recentes")
+    args = parser.parse_args()
+
+    downloader = HistoricalDataDownloader()
+    if args.data:
+        df = downloader.load(Path(args.data))
+    else:
+        files = sorted(downloader.data_dir.glob(f"{args.symbol}_M5_*.csv"))
+        if not files:
+            logger.error("Nenhum CSV em {}. Rode antes: python -m backtest.downloader", downloader.data_dir)
+            return 1
+        df = downloader.load(files[-1])
+    if args.limit:
+        df = df.iloc[-args.limit:]
+
+    result = BacktestEngine(initial_balance=args.balance).run(df, symbol=args.symbol)
+    metrics = compute_metrics(result.to_dict())
+
+    print(f"Periodo      {result.start_date} a {result.end_date}")
+    print(f"Barrows       {len(df)} (processadas {result.bars_processed}, puladas {result.bars_skipped})")
+    print(f"Trades       {metrics['total_trades']}")
+    print(f"Win rate     {metrics['win_rate_pct']:.1f}%")
+    print(f"Profit fact  {metrics['profit_factor']:.3f}")
+    print(f"P&L          {metrics['total_pnl']:.2f} USD  ({result.initial_balance:.2f} -> {result.final_balance:.2f})")
+    print(f"Max DD       {metrics['max_drawdown_pct']:.2f}%")
+    print(f"Sharpe       {metrics['sharpe_ratio']:.3f}")
+
+    sls = [t.sl_points for t in result.trades]
+    if sls:
+        print(f"SL medio     {sum(sls) / len(sls):.2f} pontos  (min {min(sls):.2f}, max {max(sls):.2f})")
+    reasons: dict[str, int] = {}
+    for t in result.trades:
+        reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+    print(f"Saidas       {reasons}")
+
+    path = save_report(result.to_dict())
+    print(f"Relatorio    {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

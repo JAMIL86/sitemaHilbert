@@ -331,6 +331,24 @@ def test_engine_balance_matches_sum_of_trade_pnl():
     assert result.final_balance == pytest.approx(esperado)
 
 
+def test_save_report_handles_the_flattened_equity_series():
+    """`to_dict()` achata a curva numa Series — o report não pode exigir 'time'.
+
+    Bug real: rodar `python -m backtest.engine` sobre dados do MT5 quebrava
+    com KeyError: 'time' só na etapa de salvar o relatório, depois de 12 min
+    de backtest. O teste roda o report sobre o payload REAL do engine.
+    """
+    from backtest.engine import BacktestEngine
+    from backtest.report import save_report
+
+    result = BacktestEngine().run(_synthetic(300))
+    saved = save_report(result.to_dict(), output_dir=Path("backtest/reports"))
+
+    assert saved["markdown"].exists()
+    assert saved["figure"].exists()
+    assert saved["metrics"]["total_trades"] == len(result.trades)
+
+
 def test_engine_equity_curve_is_chronological():
     from backtest.engine import BacktestEngine
 

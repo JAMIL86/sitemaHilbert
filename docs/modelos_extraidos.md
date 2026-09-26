@@ -252,6 +252,60 @@ Backtest 12 meses 2025, M5, risco 1%, TP=1500 pts, SL=400 pts, 4 cabeças ativas
 13. **SSM 2D**: a equação de saída `y(t,v) =` está truncada no PDF (página 4). Coeficientes `k1, k2, α, λ1≈0.95, λ2≈0.5` são ilustrativos, não calibrados.
 14. **Timeframe de live trading** — só M5 no backtest.
 
+### Unidade de pontos — RESOLVIDO 2026-09-26 (auditoria Etapa 9)
+
+O item 12 das ambiguidades ("unidade de *pts* no XAU") foi medido contra o
+terminal MT5 real, na conta 1045989, símbolo `XAUUSD-VIP`.
+
+| Medido no terminal | Valor |
+|---|---|
+| `symbol_info().digits` | 2 |
+| `symbol_info().point` | 0,01 |
+| `trade_tick_value` / `trade_tick_size` | 1,00 USD / 0,01 |
+| Contract size | 100 oz |
+
+Portanto: **1 ponto MT5 = 0,01 de preço = 1,00 USD por 0,01 de variação a 1,00 lot.**
+
+**O que o código faz.** `Position.get_profit_points()`
+(`strategy/pdf_strategies.py:70-75`) retorna `current_price - open_price` — a
+diferença bruta de preço em USD, **não** pontos MT5. `manage_open_trade()`
+(`pdf_strategies.py:438`) compara esse valor com `inp_be_pts = 500.0`. Logo,
+na implementação atual, **BE dispara em +5,00 USD de preço**, não em +500 pts.
+
+`calculate_initial_sl()` (`pdf_strategies.py:256`) é idêntico no tratamento:
+`sl_points = atr14 × min(2.0, T_final/10.0)`, com `atr14` em USD de preço.
+
+**Números reais medidos (XAUUSD-VIP M5, 2026-03-30 a 2026-09-25, 35.359 barras):**
+
+| Grandeza | Valor | Fração |
+|---|---|---|
+| ATR14 médio | 5,198 USD | — |
+| ATR14 médio em pontos MT5 | 519,8 pts | — |
+| SL médio observado no backtest | 6,5 USD | 650 pts MT5 |
+| `inp_be_pts` | 500,0 | = 5,00 USD se lido como preço |
+
+**Achado.** O BE a 500 e o SL médio a 6,5 estão na **mesma unidade de código**
+(ambos em delta de preço), e o desvio é de **77×**: o breakeven exigiria 77
+vezes o próprio risco inicial, o que o torna inalcançável na prática. Isso
+explica por que as parciais 30%/30% nunca disparam em M5 — elas compartilham
+o mesmo gatilho (`inp_parcial1_pts`, default 500).
+
+**Duas leituras possíveis, e o PDF não decide entre elas:**
+
+1. O PDF expressa "pts" em **pontos MT5** (então `inp_be_pts=500` = 5,00 USD,
+   e o bug é a conversão ausente em `get_profit_points`); ou
+2. O PDF expressa "pts" em **dollars de preço** (então 500 é o valor nominal
+   do input, e o que está errado é o valor em si — 500 USD ≈ 96 ATR em M5, o
+   que tampouco faz sentido como gatilho).
+
+Sob a leitura 1, 500 pts MT5 ≈ o ATR14 do M5 — o que é coerente com um
+gatilho de gestão. Sob a leitura 2, o número é implausível.
+
+**NADA FOI AJUSTADO.** Este bloco é diagnóstico; a correção da unidade em
+`get_profit_points()` (multiplicar por `1/point` e dividir `inp_be_pts` por
+`1/point`, ou o inverso) muda a estratégia e exige aprovação explícita antes
+de ser aplicada.
+
 ---
 
 ## Modelo 2 — Hilbert Transform + ISOM (WCE 2014)

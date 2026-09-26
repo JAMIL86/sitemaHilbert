@@ -34,18 +34,25 @@ def build_equity_figure(equity_curve: pd.DataFrame) -> "object":
 
     fig = go.Figure()
 
+    if isinstance(equity_curve, pd.DataFrame) and "time" in equity_curve.columns:
+        x = equity_curve["time"]
+        y = equity_curve["equity"]
+        dd = equity_curve["drawdown_pct"] if "drawdown_pct" in equity_curve.columns else None
+    else:
+        # `BacktestResult.to_dict()` achata a curva numa Series de equity.
+        # Sem 'time', o índice é a ordem cronológica das barras.
+        x = equity_curve.index
+        y = equity_curve
+        dd = None
+
     fig.add_trace(go.Scatter(
-        x=equity_curve["time"],
-        y=equity_curve["equity"],
-        name="Equity",
+        x=x, y=y, name="Equity",
         line=dict(color=PALETTE["equity"], width=2),
     ))
 
-    if "drawdown_pct" in equity_curve.columns:
+    if dd is not None:
         fig.add_trace(go.Scatter(
-            x=equity_curve["time"],
-            y=equity_curve["drawdown_pct"],
-            name="Drawdown %",
+            x=x, y=dd, name="Drawdown %",
             line=dict(color=PALETTE["drawdown"], width=1, dash="dot"),
         ))
 
