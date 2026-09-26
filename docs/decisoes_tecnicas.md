@@ -186,3 +186,79 @@ produziria bandas de confiança em torno de uma perda.
 **Confiança:** verificada (números do backtest real, commit `b5656cf`).
 **Escopo:** projeto Hilberti. **Invalidada por:** inclusão de custos, correção
 da unidade de BE, ou mudança nos parâmetros do V26.
+
+---
+
+## 7. O PDF WCE 2014 não é implementável sozinho — três lacunas
+
+Antes de "ativar WCE 2014" como modelo primário, a leitura literal das
+pp. 927–933 mostrou que **três decisões necessárias não estão no artigo**. Cada
+uma é um ponto onde é fácil inventar regra sem perceber.
+
+**7.1 Não existe `I>0, Q>0 = Quarter 1` no WCE.**
+
+O artigo define os quadrantes **geometricamente** (Figuras 5 e 7, eixos I vs
+Q). A frase literal é sobre cruzamento de quadrante, não sobre sinal de eixo:
+
+> "whenever the signal crosses Quarter 1, the price is likely to rise
+> afterwards, until it exits from Quarter 1 to any other quarter."
+
+O mapeamento algébrico `Q1 = {I>0, Q>0}` e `Q3 = {I<0, Q<0}` vem do **PDF
+V26 (p. 3)**, que interpreta o WCE. É geometricamente correto para o eixo I no
+horizontal e Q no vertical — mas a fonte é outro PDF. Implementar a partir do
+WCE sem registrar isso é atribuir ao artigo uma regra que ele não escreve.
+
+**7.2 O ISOM não tem threshold. Não há `dx(%)` em lugar nenhum.**
+
+O artigo diz, literalmente:
+
+> "the ISOM is a model that takes into consideration a certain threshold
+> dx(%) and will observe the timings where the directional changes dc occur."
+
+e no Listing 1:
+
+> "Filter out data with low numbers of directional changes"
+
+O símbolo `dx(%)` aparece, o **valor não**. "low numbers" também é qualitativo.
+Logo **o filtro ISOM não é implementável a partir deste PDF** — qualquer valor
+de corte seria inventado. Decisão: filtro **desativado com warning explícito**,
+não um threshold chutado.
+
+**7.3 WCE não tem stop loss. Nenhum.**
+
+A única regra de saída escrita é fechar ao sair do quadrante:
+
+> "…which is closed when the signal exits the quarter."
+
+Não há SL, TP, trailing, break-even, parciais nem management de risco em lugar
+nenhum do artigo ("Gestão de risco: não especificada"). Sem SL, um trade pode
+ficar aberto atravessando o ciclo inteiro do Hilbert, e o Max DD do backtest
+fica sem teto. **Decisão:** usar o `calculate_initial_sl` do V26
+(`ATR14 × min(2.0, T_final/10)`, `pdf_strategies.py:256`) como guardrail de
+projeto, registrado como **guardrail, não regra do PDF**. Sem isso o backtest
+mede uma estratégia sem controle de risco e produz DD irreal.
+
+**Confiança:** verificada nas citações (grep no `_extract/WCE2014_pp927-933.txt`,
+linhas 512–525 e 371–440) — o que o PDF **não** contém é conclusão negativa,
+mais frágil, mas sustentada por leitura completa do texto extraído.
+**Escopo:** projeto Hilberti; a generalize a "ativar um paper acadêmico como
+modelo primário" — sempreseparar o que o paper diz do que a implementação
+precisa e não tem.
+**Invalidada por:** o PDF completo (não só pp. 927–933) declarar o valor de
+`dx%` ou o mapeamento algébrico dos quadrantes.
+
+---
+
+## 8. O `_extract/` já existe — não reprocessar o PDF
+
+`pdfs/WCE2014_pp927-933.pdf` já foi extraído para
+`_extract/WCE2014_pp927-933.txt` e `.json` (Etapa 1). Rodar `pdfplumber` de novo
+custa tempo e produz o mesmo resultado.
+
+**Ressalva de qualidade:** o `.txt` tem as **duas colunas da página
+entrelaçadas** (padrão do pdfplumber em layout de duas colunas). As frases
+ficam intercaladas com texto da coluna vizinha, e o encoding das fontes quebra
+símbolos — `dx(%)` aparece como `dx(cid:1856)(cid:1876)%(cid:4667)`, e o sinal
+de menos renderiza como `−` (U+2212) ou `−` ilegível. Ler o `.txt` sem saber
+disso produz citação errado. Ao extrair regra de paper de duas colunas,
+**reconstruir a ordem de leitura** e marcar o que foi reconstruído.

@@ -350,18 +350,63 @@ Pipeline do Listing 1 (pseudo-código, n=3):
 
 O artigo **não** usa Roofing, EIT, EBSW, CycleMode, ATR, SSM, EMD/HHSA nem as 4 cabeças — isso é exclusivo do V26.
 
-### Gatilhos de entrada (compra e venda)
+### Gatilhos de entrada (compra e venda) — CITAÇÕES LITERAIS (2026-09-26)
 
-Regra explícita (páginas 6–7, Figure 7):
+Extraídas de `pdfs/WCE2014_pp927-933.pdf` via `_extract/WCE2014_pp927-933.txt`.
+O texto bruto do pdfplumber entrelaça as **duas colunas** da página, então as
+citações abaixo são **reconstruídas na ordem de leitura** da coluna esquerda.
+Trechos entrelaçados estão marcados; a versão literal não-colunar está entre
+aspas.
 
-- O plano I-Q é dividido em **4 quadrantes**.
-- **BUY:** quando o sinal rotacional **entra no Quarter 1**. Mantém compra enquanto permanece em Q1.
-- **SELL:** quando o sinal rotacional **entra no Quarter 3**. Mantém venda enquanto permanece em Q3.
-- “The system is either on buy mode or on sell mode.”
+**BUY — Q1 (páginas 6–7, Figura 7):**
 
-O artigo **não** escreve `I>0, Q>0` / `I<0, Q<0`. Essa formalização dos sinais dos eixos é do PDF V26 (página 3), que interpreta o WCE 2014. No artigo original, a definição geométrica de Quarter 1 e Quarter 3 depende da Figure 5/7 (eixos I vs Q), cujo texto não rotula numericamente os sinais.
+> "It has been [observed] throughout all 100 simulations that whenever the
+> signal crosses Quarter 1, the price is likely to rise afterwards, until it
+> exits from Quarter 1 to any other quarter."
 
-Filtro obrigatório: ISOM deve ter filtrado os horários de baixa contagem DC **antes** de aplicar Hilbert.
+> "In other words, whenever the rotating signal crosses the Quarter 1 we
+> place a buy position, which is closed when the signal exits the quarter."
+
+**SELL — Q3 (página 7):**
+
+> "Furthermore, whenever the signal crosses into Quarter 3, the price is
+> likely to fall until it exits Quarter 3 into any other Quarter."
+
+> "A sell position is also placed whenever Quarter 3 is crossed and closed
+> when the signal is out of the quarter."
+
+**Saída:**
+
+> "…which is closed when the signal exits the quarter."
+
+Única regra de saída escrita no artigo: **fechar ao sair do quadrante ativo**.
+Não há SL, TP, trailing, break-even nem parciais.
+
+**Modos:**
+
+> "Table 1 illustrates the mechanism of trading using the rotation principle,
+> where the system would be either buying or selling each time the signal is
+> in the specific quarter. The system is either on buy mode or on sell mode."
+
+**ISOM (páginas 3–4):**
+
+> "In its simple definition, the ISOM is a model that takes into
+> consideration a certain threshold dx(%) and will observe the timings where
+> the directional changes dc occur."
+
+> "Apply the ISOM system to pinpoint times of day with higher volatility"
+
+> "Filter out data with low numbers of directional changes" (Listing 1)
+
+O valor numérico de `dx(%)` **não aparece** em nenhum ponto do artigo, e o
+corte de "low numbers of directional changes" também é qualitativo. Logo o
+filtro ISOM **não tem threshold implementável** a partir deste PDF — ver
+ambiguidade 2.
+
+**Mapeamento algébrico dos quadrantes:** o artigo **não** escreve
+`I>0, Q>0 = Q1` / `I<0, Q<0 = Q3`. Essa formalização vem do PDF V26
+(página 3), que interpreta o WCE 2014. No artigo original a definição é
+geométrica (Figuras 5 e 7, eixos I vs Q). Ver ambiguidade 1.
 
 ### Regras de saída (SL, TP, trailing)
 

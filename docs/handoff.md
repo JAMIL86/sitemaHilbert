@@ -434,6 +434,29 @@ estratégia e precisa de aval explícito.
 está reprovado (PF 0,93). Não avançar para FASE 2 sem resolver a unidade e
 re-rodar.
 
+## 12. DECISÃO DO RESPONSÁVEL (2026-09-26) — ativar WCE 2014
+
+**V26 reprovado no backtest real: PF 0,929** (6 meses, 35 359 barras,
+1 746 trades, P&L −280,51 USD). Decisão: **ativar WCE 2014** como modelo
+primário, V26 permanece disponível como comparação (não removido).
+
+**Regras do WCE 2014** (citação literal em `docs/modelos_extraidos.md` §
+"Modelo 2 — regras operacionais", extraídas de
+`pdfs/WCE2014_pp927-933.pdf`, Figura 1 plano I-Q e Figura 5 transições):
+
+| Regra | Regra |
+|---|---|
+| BUY | entrada no **Q1** (I > 0 e Q > 0); saída ao **deixar o Q1** |
+| SELL | entrada no **Q3** (I < 0 e Q < 0); saída ao **deixar o Q3** |
+| Filtro | ISOM pinpointa horários de alta volatilidade; sem `dx%` numérico no PDF, o filtro fica **desativado com warning** — nenhum threshold inventado |
+
+**Referência:** `pdfs/WCE2014_pp927-933.pdf` — Figura 1 (resposta em
+frequência do Hilbert transform), Figura 5 (princípio de rotação nos
+componentes em fase/quadratura), Figura 7 (aplicação em estratégia).
+
+Estado: WCE 2014 ainda em **modo sombra** (`WCE2014Strategy.signal`).
+Ativação, testes, backtest com custos e auditoria são as Fases 1–5.
+
 ## 11. Armadilhas conhecidas
 
 Ver **`docs/decisoes_tecnicas.md`** — cada uma com a evidência que a sustenta:
