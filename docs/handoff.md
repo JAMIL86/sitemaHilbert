@@ -5,7 +5,49 @@
 > **Motor de Decisão:** Python (sole decision engine)  
 > **Broker de Execução:** MetaTrader 5 (execution only)  
 > **Versão Operacional:** V26 Precision Accumulation Breakout + WCE 2014 Shadow  
-> **Status Global:** Etapas 1 a 8 concluídas com 100% dos testes verdes (67 testes aprovados, exceto o teste de conexão MT5 ao vivo que exige terminal aberto)  
+> **Status Global:** Etapas 1 a 8 concluídas com 100% dos testes verdes (67 testes aprovados, exceto o teste de conexão MT5 ao vivo que exige terminal aberto). **Etapa 9 FASE 0 concluída** — iniciando backtest histórico.
+
+---
+
+## Skills Disponíveis (Etapa 9)
+
+| Skill | Path | Uso Etapa 9 |
+|---|---|---|
+| `cost-mode` | `~/.claude/skills/cost-mode/` | ✅ Ativo |
+| `backtest-expert` | `~/.claude/skills/backtest-expert/` | ✅ Walk-forward, out-of-sample, Monte Carlo |
+| `edge-strategy-reviewer` | `~/.claude/skills/edge-strategy-reviewer/` | ✅ Veredicto PASS/REVISE/REJECT |
+| `tdd` | `~/.agents/skills/tdd/` | ✅ Testes disciplinares |
+| `dataviz` | bundled | ✅ Equity curve (paleta validada) |
+| `code-review` | `~/.agents/skills/code-review/` | ✅ Git disponível (commit bc31b8c) |
+| `claude-handoff` | `~/.agents/skills/claude-handoff/` | ✅ Atualização deste arquivo |
+
+**IMPORTANTE:** Todas as skills do mattpocock estão em `~/.agents/skills/`, **NÃO** em `~/.claude/skills/`.
+
+## Etapa 9 — Backtest Histórico (EM PROGRESSO)
+
+**Status:** FASE 1 em andamento — 1/4 módulos criados.
+
+**Arquivos criados (FASE 1):**
+- `backtest/downloader.py` (177 linhas, 5.9 KB) — download MT5 histórico, validação gaps/lookahead ✅ SALVO
+
+**Próximos arquivos (FASE 1):**
+- `backtest/engine.py` — executar V26 no histórico sem lookahead bias
+- `backtest/metrics.py` — win rate, profit factor, max DD, Sharpe, sortino
+- `backtest/report.py` — markdown + equity curve (dataviz)
+- `tests/test_backtest.py` — 5 testes (skill tdd)
+
+**Configuração GitHub (pendente):**
+- User: JAMIL86
+- Email: veloxbrcaldas@gmail.com
+- Repo: https://github.com/JAMIL86/sitemaHilbert.git
+
+**Flags de segurança (FASE 1):**
+```
+dry_run = True
+live_trading = False
+```
+
+**Git:** commit bc31b8c | branch: main | 46 arquivos rastreados
 
 ---
 
