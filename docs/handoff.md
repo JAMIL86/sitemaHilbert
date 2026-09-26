@@ -339,8 +339,113 @@ Mantidos explicitamente em `config/settings.py` como `None` (ou com fallbacks do
   `account_info().login != 1045989`**. Símbolo corrigido para `XAUUSD-VIP`.
 - **Etapa 7 — IA/ML + Shadow Logging:** ver inventário acima. Split temporal obrigatório.
 - **Etapa 8 — Dashboard Streamlit:** ver inventário acima. Somente leitura, sem mutação de `strategy/`, `ai/` ou `core/`.
+- **Etapa 9 FASE 1 — Backtest:** 4 módulos (`downloader`, `engine`, `metrics`,
+  `report`) + 24 testes. Ver seção 9 abaixo.
 
-## 8. Próxima Etapa
+---
 
-A definir após confirmação explícita. Nenhuma etapa avança sem aval do responsável.
+## 9. Etapa 9 — Backtest com dados REAIS (2026-09-26, commit `b5656cf`)
+
+O backtest anterior rodou em dados SINTÉTICOS (`default_rng(7)`) e **não era
+conclusivo**. Este é o primeiro resultado sobre dado real.
+
+### Dados
+
+| Item | Valor |
+|---|---|
+| Fonte | MT5 Headway, conta 1045989, VTMarkets-Demo |
+| Símbolo | XAUUSD-VIP M5 |
+| Período | 2026-03-30 08:15 UTC a 2026-09-25 23:55 UTC |
+| Barras | 35 359 |
+| Arquivo | `backtest/data/XAUUSD-VIP_M5_2026-03-30_2026-09-25.csv` (2,4 MB) |
+
+Sessão do ativo: **01:00–23:55 UTC, todo dia** (fecha 65 min/dia + fim de
+semana). Os 129 "gaps" brutos da série são fechamentos, **não** barras
+faltando. Lacuna real: 1 (3 barras, 2026-08-28).
+
+### Resultado real (6 meses, 35 159 barras processadas, 0 puladas)
+
+| Métrica | Sintético | **Real** |
+|---|---|---|
+| Trades | 41 | **1 746** |
+| Win rate | 39,0% | **40,3%** |
+| Profit factor | 0,532 | **0,929** |
+| P&L | −30,24 USD | **−280,51 USD** |
+| Max drawdown | — | **3,87%** |
+| Sharpe | −17,70 | **−1,441** |
+| SL médio | 6,5 | **8,64** (min 1,92, max 31,58) |
+| Saídas | 16 SL / 16 TRAIL | **1 043 SL / 703 TRAIL** |
+
+O Sharpe melhorou 12× porque agora reflete densidade real de trades
+(1 746 trades / 179 dias), não ruído sintético.
+
+### Veredito: **PF 0,929 < 1,0 → NÃO autorizar FASE 2**
+
+Pela regra do responsável (PF > 1,3 autoriza; PF < 1 discutimos REVISE), o
+resultado cai na faixa de **REVISE**. FASE 2 (walk-forward, out-of-sample,
+Monte Carlo) **não deve rodar** até a causa ser entendida — fazer Monte Carlo
+de um edge negativo só produziria bandas de confiança em torno de uma perda.
+
+### AUDITORIA DO PARÂMETRO BE=500 — É BUG DE UNIDADE. NADA AJUSTADO.
+
+Documentado em `docs/modelos_extraidos.md` §"Unidade de pontos — RESOLVIDO".
+
+**Medido no terminal real:** `point = 0,01`, `tick_value = 1,00 USD`,
+contract 100 oz. Logo 1 ponto MT5 = $0,01 de preço.
+
+**O que o código faz:** `Position.get_profit_points()` (`pdf_strategies.py:70`)
+retorna delta bruto de preço, e `manage_open_trade()` (linha 438) o compara
+com `inp_be_pts = 500.0`. **BE só dispara em +$5,00 de preço.**
+
+**Números medidos no dado real:** ATR14 médio = **5,198 USD** (519,8 pts
+MT5). SL médio = 8,64 USD. `inp_be_pts=500` em delta de preço = **96 ATR**.
+
+O BE está **96× mais longe que o SL inicial** — inalcançável, por isso as
+parciais 30%/30% nunca disparam em M5. Confirmado pelo backtest: **zero
+parciais**, e 1 043 das 1 746 saídas foram no stop inicial.
+
+**Duas leituras possíveis, o PDF não decide:** (1) "pts" = pontos MT5, e o bug
+é a conversão ausente em `get_profit_points()`; (2) "pts" = dollars de preço, e
+500 é nominalmente implausível. A leitura 1 é a coerente — 500 pts MT5 ≈ 1 ATR.
+
+**Correção proposta (NÃO APLICADA — aguarda aprovação):** converter
+`get_profit_points()` para pontos MT5 (dividir por `point`) e ajustar
+`calculate_initial_sl()` e `inp_be_pts` para a mesma unidade. Isso muda a
+estratégia e precisa de aval explícito.
+
+### Bugs corrigidos nesta rodada
+
+1. **`mt5.initialize()` retornava `(-2, 'Invalid params')`** — o `MT5Connector`
+   injeta `server=` do `.env` (VTMarkets-Demo) e num terminal já autenticado
+   isso falha. `downloader._connect()` agora usa `mt5.initialize(path=)` sem
+   `server=`; credenciais só entram se `mt5_login` estiver definido.
+2. **Validação de gaps rejeitava dado íntegro** — contava fechamento de
+   mercado como corrupção (129 gaps). Agora só conta buraco que não cruza a
+   fronteira de sessão.
+3. **`python -m backtest.downloader` / `.engine` não existiam** — sem bloco
+   `__main__`. Adicionados.
+4. **`KeyError: 'time'` no report** — `to_dict()` achata a equity numa Series;
+   o report exigia `.columns` e `'time'`. Só aparecia **depois** de 12 min de
+   backtest. Corrigido + teste de regressão.
+
+## 10. Próxima Etapa
+
+**Aguardando decisão do responsável sobre a unidade de BE.** O backtest real
+está reprovado (PF 0,93). Não avançar para FASE 2 sem resolver a unidade e
+re-rodar.
+
+## 11. Armadilhas conhecidas
+
+Ver **`docs/decisoes_tecnicas.md`** — cada uma com a evidência que a sustenta:
+
+1. `mt5.initialize()` com `server=` falha em terminal já autenticado → bypass
+   do `MT5Connector` na leitura de histórico.
+2. `mt5_login` é alias (`MT5_LOGIN`); passar por kwargs de campo é descartado
+   silenciosamente por `extra="ignore"`.
+3. "Gap > 10 min" rejeita dado íntegro em ativo de sessão limitada.
+4. Bug de unidade BE=500 (diagnóstico, não corrigido).
+5. `to_dict()` achata a equity — o report quebra no payload real, não na
+   fixture do teste. Coberto por teste de regressão.
+6. Backtest real PF 0,929 → faixa REVISE. Custos (spread/comissão) ainda não
+   modelados.
 
