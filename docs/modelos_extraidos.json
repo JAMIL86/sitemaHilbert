@@ -1,0 +1,158 @@
+{
+  "meta": {
+    "system_name": "Hilberti",
+    "version": "V26 + WCE2014 Shadow",
+    "source_files": [
+      "pdfs/Hilbert_Chimera_Dashboard_V26.pdf",
+      "pdfs/WCE2014_pp927-933.pdf"
+    ],
+    "timeframe": "M5",
+    "target_assets": [
+      "XAUUSD",
+      "XAGUSD"
+    ],
+    "decision_engine": "Python",
+    "execution_broker": "MetaTrader 5 (execution only)"
+  },
+  "platform_rules": {
+    "magic_number": 20250924,
+    "risk_percent_per_trade": 1.0,
+    "daily_stop_percent": 3.0,
+    "dry_run_default": true,
+    "timeframe": "M5",
+    "max_window_bars": 1000
+  },
+  "model_v26": {
+    "name": "Hilbert Cycle + Chimera SSM V26",
+    "subtitle": "Precision Accumulation Breakout",
+    "role": "execution_engine",
+    "timeframe": "M5",
+    "dsp_pipeline": {
+      "wma_xau_weights": [
+        4.0,
+        3.0,
+        2.0,
+        1.0
+      ],
+      "wma_xau_divisor": 10.0,
+      "wma_xag_weights": [
+        5.0,
+        4.0,
+        3.0,
+        2.0,
+        1.0
+      ],
+      "wma_xag_divisor": 15.0,
+      "detrender_fir_weights": [
+        0.25,
+        0.0,
+        0.75,
+        0.0,
+        -0.25,
+        0.0,
+        -0.75
+      ],
+      "hilbert_fir_order_n": 3,
+      "hilbert_q1_weights": [
+        0.25,
+        0.0,
+        0.75,
+        0.0,
+        -0.25,
+        0.0,
+        -0.75
+      ],
+      "hilbert_i1_delay_bars": 3,
+      "homodyne_ema_alpha": 0.5,
+      "roofing_alpha": 0.707,
+      "eit_flat_factor": 0.0005,
+      "ebsw_sine_lead_deg": 45.0,
+      "ebsw_leadsine_lead_deg": 135.0,
+      "cyclemode_threshold": 0.85,
+      "agc_sma_period": 50,
+      "atr_period": 14
+    },
+    "heads": {
+      "head1": {
+        "name": "CHilbertEngine",
+        "function": "Cycle + Phase + EBSW signals (buySignal/sellSignal)",
+        "mode": "active"
+      },
+      "head2": {
+        "name": "CHoloHilbert",
+        "function": "Accumulation & Breakout energy (isAccumulating/breakout)",
+        "mode": "active"
+      },
+      "head3": {
+        "name": "CISOMEngine",
+        "function": "One-vs-Rest Logistic Regression on spectral features (Normal/High/Extreme)",
+        "mode": "shadow",
+        "lr": 0.001
+      },
+      "head4": {
+        "name": "GatingLayer",
+        "function": "SwiGLU Trend-following vs Mean-reversion adaptive gating",
+        "mode": "shadow"
+      }
+    },
+    "entry_triggers": {
+      "buy": {
+        "quadrant_transition": "Q4 -> Q1 (Sine crosses above LeadSine in Q4)",
+        "cycle_mode": 1,
+        "accumulation_confirmed": "Roofing_energy < 0.5 * SMA(energy, N) for N bars AND |IT(t) - IT(t-1)| < 0.0005 * price AND CycleMode == 1",
+        "breakout_latched": "HighEnergy AND price > IT + threshold_atr"
+      },
+      "sell": {
+        "quadrant_transition": "Q2 -> Q3 (Sine crosses below LeadSine in Q2)",
+        "cycle_mode": 1,
+        "accumulation_confirmed": "Roofing_energy < 0.5 * SMA(energy, N) for N bars AND |IT(t) - IT(t-1)| < 0.0005 * price AND CycleMode == 1",
+        "breakout_latched": "HighEnergy AND price < IT - threshold_atr"
+      },
+      "cooldown_bars": 3,
+      "max_spread": {
+        "xau_factor_atr": 0.1,
+        "xag_factor_atr": 0.2,
+        "default_factor_atr": 0.15
+      }
+    },
+    "exit_rules": {
+      "structural_sl_formula": "ATR14 * min(2.0, T_final / 10.0)",
+      "sl_atr_cap": 2.0,
+      "sl_period_divisor": 10.0,
+      "breakeven_pts": 500.0,
+      "partial_1_pct": 30.0,
+      "partial_2_pct": 30.0,
+      "trailing_stop": {
+        "formula": "AmplitudeNorm * InpTrailBasePct * CycleStrength",
+        "cycle_strength_on": 1.0,
+        "cycle_strength_off": 0.6,
+        "monotonic": true
+      },
+      "phase_reversal_exit": {
+        "threshold_radians": 3.141592653589793,
+        "degrees": 180.0,
+        "action": "Tighten trailing stop to 0.5 * TrailPoints (smooth exit)",
+        "trail_tighten_factor": 0.5
+      },
+      "fixed_tp": null
+    },
+    "uncalibrated_parameters": {
+      "t_min": null,
+      "t_max": null,
+      "isom_dx_percent": null,
+      "accumulation_energy_n": null,
+      "breakout_threshold_atr": null
+    }
+  },
+  "model_wce2014": {
+    "name": "WCE 2014 — Hilbert Transform + ISOM",
+    "role": "shadow_mode_comparison",
+    "timeframe": "M5",
+    "entry_logic": {
+      "buy": "Quadrant 1 (I > 0 and Q > 0) with high DC count in ISOM hourly bin",
+      "sell": "Quadrant 3 (I < 0 and Q < 0) with high DC count in ISOM hourly bin"
+    },
+    "filter": "Directional Changes (DC) threshold dx% per hourly bin",
+    "shadow_execution": true
+  }
+}
