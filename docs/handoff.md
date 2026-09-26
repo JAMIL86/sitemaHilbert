@@ -5,7 +5,7 @@
 > **Motor de Decisão:** Python (sole decision engine)  
 > **Broker de Execução:** MetaTrader 5 (execution only)  
 > **Versão Operacional:** V26 Precision Accumulation Breakout + WCE 2014 Shadow  
-> **Status Global:** Etapas 1 a 8 concluídas com 100% dos testes verdes (67 testes aprovados, exceto o teste de conexão MT5 ao vivo que exige terminal aberto). **Etapa 9 FASE 0 concluída** — iniciando backtest histórico.
+> **Status Global:** Etapas 1 a 8 concluídas. **Etapa 9 FASE 1 concluída** — backtest funcional, 90 testes verdes (a única falha, `test_mt5_headway_connection`, é ambiental: exige o terminal Headway aberto). FASE 2 (validação anti-overfitting) é a próxima.
 
 ---
 
@@ -23,31 +23,46 @@
 
 **IMPORTANTE:** Todas as skills do mattpocock estão em `~/.agents/skills/`, **NÃO** em `~/.claude/skills/`.
 
-## Etapa 9 — Backtest Histórico (EM PROGRESSO)
+## Etapa 9 — Backtest Histórico
 
-**Status:** FASE 1 em andamento — 1/4 módulos criados.
+**Status:** FASE 1 concluída. FASE 2 (anti-overfitting) pendente.
 
-**Arquivos criados (FASE 1):**
-- `backtest/downloader.py` (177 linhas, 5.9 KB) — download MT5 histórico, validação gaps/lookahead ✅ SALVO
+**Módulos (todos commitados):**
+- `backtest/downloader.py` — download MT5 histórico + validação (gaps, ordem, precos)
+- `backtest/engine.py` — execução barra a barra do V26 sem lookahead
+- `backtest/metrics.py` — win rate, PF, max DD, Sharpe, Sortino
+- `backtest/report.py` — markdown + equity curve (eixo Y único, paleta validada)
+- `tests/test_backtest.py` — 23 testes
 
-**Próximos arquivos (FASE 1):**
-- `backtest/engine.py` — executar V26 no histórico sem lookahead bias
-- `backtest/metrics.py` — win rate, profit factor, max DD, Sharpe, sortino
-- `backtest/report.py` — markdown + equity curve (dataviz)
-- `tests/test_backtest.py` — 5 testes (skill tdd)
+**Decisões de arquitetura que não são óbvias no código:**
+
+1. **As saídas vêm do V26, não do engine.** `BacktestEngine` não implementa
+   take-profit nem stop próprio — delega a `V26Strategy.manage_open_trade()`,
+   que aplica breakeven (+500 pts), parciais 30%/30%, trailing AGC e saída por
+   inversão de fase 180°. O PDF declara "SEM Take Profit fixo", então não há TP.
+   A primeira versão do engine reimplementava as saídas e produzia 23 trades
+   com **zero** vencedores; delegar corrigiu para 16/41. Se alguém reintroduzir
+   lógica de saída no engine, o resultado volta a distorcer.
+
+2. **Janela de features = `df.iloc[max(0, i-window):i]`.** A barra `i` nunca entra
+   na própria decisão. Há um teste que espia `FeatureEngineer.compute()` e
+   compara o último timestamp da janela com o da barra corrente.
+
+3. **Sharpe/Sortino anualizam pela densidade real de trades** (`_periods_per_year`).
+   Fixar 252×78 (um trade por barra) inflava o Sharpe em ordens de grandeza.
 
 **Configuração GitHub (pendente):**
 - User: JAMIL86
 - Email: veloxbrcaldas@gmail.com
 - Repo: https://github.com/JAMIL86/sitemaHilbert.git
 
-**Flags de segurança (FASE 1):**
+**Flags de segurança (inalteradas em toda a Etapa 9):**
 ```
 dry_run = True
 live_trading = False
 ```
 
-**Git:** commit bc31b8c | branch: main | 46 arquivos rastreados
+**Git:** commit `01bc865` | branch: main | `Executor` nunca importado por `backtest/`
 
 ---
 
