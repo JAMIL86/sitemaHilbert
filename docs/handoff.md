@@ -626,3 +626,33 @@ fonte. Um híbrido que não está em nenhum dos dois papers.
   aplicada. Continua pendente de decisão.
 - **Slippage de 1 pt**: permanece HIPÓTESE declarada no docstring do `CostModel`.
   Medir na corretora é a única forma de promoted a medição.
+
+### 13.6 Auditoria do guardrail (FASE 4) — o número que mais importa
+
+O relatório do WCE separa **qual regra** encerrou cada posição:
+
+| Encerrado por | Fonte da regra | Trades | P&L |
+|---|---|---:|---:|
+| SL (stop guardrail) | **V26, não o PDF** | 165 (18,5%) | −1221,62 USD |
+| QUADRANT | **WCE 2014, literal** | 729 (81,5%) | +953,52 USD |
+
+A lógica que é realmente do artigo (+953,52) é **menor em magnitude** que a
+perda produzida pelo stop emprestado do V26 (−1221,62). O total de −268,10 é a
+diferença entre as duas. Numa variante do WCE **sem** guardrail o resultado
+seria materialmente diferente — e unknowable, porque o artigo não diz o que
+fazer quando o preço se move contra a entrada dentro do quadrante.
+
+Este é o número a ler antes de qualquer promoção: não é "18,5% dos trades
+dependem do stop", é "o stop de outra fonte perde mais dinheiro do que a regra
+do artigo ganha".
+
+### 13.7 Custos: a contabilidade fecha
+
+V26 sem custos −280,51 → com custos −891,61. Diferença 611,10 = exatamente o
+`total_costs` medido. Os dois relatórios com custos estão em diretórios
+próprios (`backtest/reports/v26_custos/`, `wce_custos/`) e a baseline
+`backtest_XAUUSD_VIP.md` segue intacta com 1746 trades / PF 0,93.
+
+Com spread medido de 0,34 (não o fallback de 0,15) o V26 cai de PF 0,929 para
+0,795. Qualquer conclusão anterior que cite 0,929 **não inclui custos** e
+precisa ser lida assim.
