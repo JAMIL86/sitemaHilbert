@@ -24,6 +24,15 @@ O WCE 2014 nao define stop. Todo trade deste modelo carrega um stop guardrail de
 
 **165 de 894 trades (18.5%) dependem do guardrail** — o P&L deles ($ -1221.62) vem de uma regra que o artigo nao escreve. Se o WCE for julgado pelo resultado total, essa fracao e o que precisa ser lida como artificio de risco, nao como edge.
 
+> **Rodape de fidelidade (decisoes_tecnicas.md §9.6).** O PDF nao usa o
+> ISOM como *filtro* de um sinal Hilbert — usa como **entrada** do
+> transform: "use that as an input for the Hilbert transform to trade
+> only on times of day where volatility is at a high peak". Aqui o
+> `i1`/`q1` sao calculados sobre preco bruto, sem o condicionamento de
+> horario. Portanto estes numeros NAO sao replicacao do artigo sao o
+> artigo menos uma etapa do pipeline, mais um stop de outra fonte.
+> Ver tambem: o PF do artigo e 1.0, isto e, break-even.
+
 ## Resumo
 
 | Metrica | Valor |
