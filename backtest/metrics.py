@@ -29,34 +29,49 @@ def profit_factor(trades: list[dict]) -> float:
 
 
 def max_drawdown(equity_curve: pd.Series) -> float:
-    """Max drawdown percentual a partir da curva de equity."""
+    """Max drawdown como MAGNITUDE positiva em % (0 se curva vazia/crescente).
+
+    Convenção: retorna 10.0 para uma queda de 10%. O sinal é perdido de
+    propósito — todo relatório apresenta drawdown como risco, não como ganho.
+    """
     if equity_curve.empty:
         return 0.0
     peak = equity_curve.cummax()
     dd = (equity_curve - peak) / peak * 100
-    return dd.min()
+    return abs(dd.min())
 
 
-def sharpe_ratio(
-    trades: list[dict],
-    rf: float = 0.0,
-    periods_per_year: int = 252 * 78,  # M5 bars por ano
-) -> float:
-    """Sharpe ratio a partir dos P&Ls dos trades."""
+def _periods_per_year(trades: list[dict]) -> float:
+    """Trades por ano, derivado da densidade REAL da amostra.
+
+    Fixar 252*78 (um trade por barra) inflaria o Sharpe em ordens de
+    grandeza num conjunto com poucos trades. A anualização usa o período
+    efetivo coberto pelos timestamps dos trades.
+    """
+    stamps = [t.get("exit_time") or t.get("entry_time") for t in trades]
+    stamps = [pd.Timestamp(s) for s in stamps if s is not None]
+    if len(stamps) < 2:
+        return 1.0
+    days = (max(stamps) - min(stamps)).total_seconds() / 86_400.0
+    if days <= 0:
+        return 1.0
+    return len(trades) / (days / 365.25)
+
+
+def sharpe_ratio(trades: list[dict], rf: float = 0.0) -> float:
+    """Sharpe anualizado dos P&Ls por trade."""
     if not trades:
         return 0.0
     pnls = [t.get("pnl", 0) for t in trades]
     mean = sum(pnls) / len(pnls)
     std = math.sqrt(sum((p - mean) ** 2 for p in pnls) / len(pnls))
-    return (mean - rf) / std * math.sqrt(periods_per_year) if std > 0 else 0.0
+    if std == 0:
+        return 0.0
+    return (mean - rf) / std * math.sqrt(_periods_per_year(trades))
 
 
-def sortino_ratio(
-    trades: list[dict],
-    rf: float = 0.0,
-    periods_per_year: int = 252 * 78,
-) -> float:
-    """Sortino ratio — só penaliza downside deviation."""
+def sortino_ratio(trades: list[dict], rf: float = 0.0) -> float:
+    """Sortino anualizado — só penaliza desvio de downside."""
     if not trades:
         return 0.0
     pnls = [t.get("pnl", 0) for t in trades]
@@ -65,7 +80,9 @@ def sortino_ratio(
     if not downside:
         return float("inf")
     dd = math.sqrt(sum(d ** 2 for d in downside) / len(downside))
-    return (mean - rf) / dd * math.sqrt(periods_per_year) if dd > 0 else 0.0
+    if dd == 0:
+        return float("inf")
+    return (mean - rf) / dd * math.sqrt(_periods_per_year(trades))
 
 
 def compute_metrics(result: dict) -> dict:

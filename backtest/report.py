@@ -80,11 +80,11 @@ def build_markdown_report(result: dict, metrics: dict | None = None) -> str:
     lines = [
         f"# Backtest — {result.get('symbol', '?')}",
         "",
-        f"**Período:** {result.get('start_date', '?')} → {result.get('end_date', '?')}",
+        f"**Periodo:** {result.get('start_date', '?')} a {result.get('end_date', '?')}",
         "",
         "## Resumo",
         "",
-        "| Métrica | Valor |",
+        "| Metrica | Valor |",
         "|---------|-------|",
         f"| Total de trades | {m['total_trades']} |",
         f"| Win rate | {m['win_rate_pct']:.1f}% |",
@@ -94,7 +94,7 @@ def build_markdown_report(result: dict, metrics: dict | None = None) -> str:
         f"| Sortino ratio | {m['sortino_ratio']:.2f} |",
         f"| P&L total | ${m['total_pnl']:.2f} |",
         "",
-        "## Balanço",
+        "## Balanco",
         "",
         f"- Inicial: ${result.get('initial_balance', 0):.2f}",
         f"- Final:   ${result.get('final_balance', 0):.2f}",
@@ -104,18 +104,17 @@ def build_markdown_report(result: dict, metrics: dict | None = None) -> str:
 
     if trades:
         lines += [
-            "## Últimos 10 trades",
+            "## Ultimos 10 trades",
             "",
-            "| # | Entrada | Dir | Preço entrada | Saída | Motivo | P&L |",
-            "|---|---------|-----|---------------|-------|--------|-----|",
+            "| # | Entrada | Dir | Preco entrada | Motivo | P&L |",
+            "|---|---------|-----|---------------|--------|-----|",
         ]
         for i, t in enumerate(trades[-10:], start=max(1, len(trades) - 9)):
             pnl = t.get("pnl", 0)
-            emoji = "🟢" if pnl > 0 else "🔴"
             lines.append(
                 f"| {i} | {t.get('entry_time', '?')} | {t.get('direction', '?')} | "
-                f"{t.get('entry_price', 0):.2f} | {t.get('exit_reason', '?')} | "
-                f"{t.get('exit_reason', '-')} | {emoji} ${pnl:.2f} |"
+                f"{t.get('entry_price', 0):.2f} | {t.get('exit_reason', '-')} | "
+                f"{pnl:+.2f} |"
             )
         lines.append("")
 
