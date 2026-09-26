@@ -262,3 +262,109 @@ símbolos — `dx(%)` aparece como `dx(cid:1856)(cid:1876)%(cid:4667)`, e o sina
 de menos renderiza como `−` (U+2212) ou `−` ilegível. Ler o `.txt` sem saber
 disso produz citação errado. Ao extrair regra de paper de duas colunas,
 **reconstruir a ordem de leitura** e marcar o que foi reconstruído.
+
+---
+
+## 9. WCE 2014 ativado: o que é regra do PDF e o que é guardrail
+
+Decisões do responsável, 2026-09-26. Registradas aqui porque a implementação
+e o artigo divergem em dois pontos, e nenhum dos dois se deduz do texto.
+
+### 9.1 Q1={I>0, Q>0} — fonte: V26 p.3, não o WCE
+
+O WCE define os quadrantes **geometricamente** (Fig. 5 e 7, eixos I vs Q). O
+mapeamento algébrico vem do **V26 p.3, seção Hilbert Transform**, que
+interpreta o WCE. Autorizado explicitamente pelo responsável.
+
+Consequência de código: `WCE2014Strategy.quadrant()` retorna `None` no eixo
+exato (I ou Q == 0). Sem sinal, "estar em Q1" seria uma afirmação que o PDF
+não faz — e dispararia entrada.
+
+### 9.2 ISOM sem `dx(%)`: filtro DESATIVADO, não calibrado
+
+O artigo nomeia o threshold e não dá o valor (ver §7.2). `isom_allows(None)`
+retorna `True` para toda barra e emite um WARNING único. A alternativa —
+escolher um `dx%` plausível — produziria um backtest com um número que parece
+do artigo e não é. Aqui, o comportamento é declaradamente ausente.
+
+### 9.3 Stop loss: guardrail de projeto, rotulado como tal
+
+O WCE não define SL (§7.3). Autorizado usar `V26Strategy.calculate_initial_sl`
+(ATR14 × min(2.0, T/10)) como guardrail. Marcado em três lugares para não
+poder ser lido como regra do artigo:
+
+- `WCE2014Strategy.SL_GUARDRAIL_PROJETO = True`
+- `SignalDecision.metadata["guardrail_projeto"]`
+- docstring de `initial_sl` e do relatório de backtest
+
+Sem ele o trade atravessa o ciclo inteiro do Hilbert e o Max DD sai sem teto —
+o backtest mediria uma estratégia sem controle de risco.
+
+### 9.4 Entrada por TRAVESSIA, não por nível
+
+O PDF diz "whenever the signal **crosses** Quarter 1". Implementar por nível
+(entrar sempre que `I>0 and Q>0`) reentra **toda barra** dentro do quadrante.
+A versão shadow anterior fazia exatamente isso — e por isso não é a mesma
+estratégia que o artigo descreve. Só contam as travessias Q4→Q1 (BUY) e
+Q2→Q3 (SELL).
+
+Isto mudou `tests/test_strategy.py::test_wce2014_shadow_signals`, que fixava o
+comportamento por nível. O teste foi reescrito para a travessia, com o motivo
+registrado na docstring — não é um teste "ajustado até passar".
+
+### 9.5 Custos: default ligado
+
+`--with-costs` default `True`. Um backtest que não cobra spread produz PF que
+não se reproduz ao vivo. `load_spread()` devolve `None` (não `0.0`) quando o
+MT5 não responde: zero seria afirmar que o ativo é grátis. O relatório registra
+se o spread veio do terminal ou do fallback de 0,15.
+
+### 9.6 A quarta lacuna — o ISOM é ENTRADA do Hilbert, não filtro
+
+Descoberta em 2026-09-26 pelo `edge-strategy-reviewer`, e maior que as três de
+§7. Literal do PDF (`_extract/WCE2014_pp927-933.txt:254`):
+
+> "apply the ISOM model on high frequency data, then determine the times of day
+> with highest levels of intraday observations i.e. higher intraday event driven
+> volatility, **and use that as an input for the Hilbert transform** to trade
+> only on times of day where volatility is at a high peak. This will in turn
+> overcome the problems presented by [3], where the Hilbert transform rotation
+> goes out of bounds at periods of low volatility."
+
+O WCE **não** usa ISOM como filtro de um sinal Hilbert já calculado. Ele usa
+ISOM para escolher as horas do dia, e só então aplica o Hilbert transform
+**naquelas horas**. `ai/feature_engineer.py:115-122` calcula `i1`/`q1` sobre
+preço bruto, sem o condicionamento.
+
+Por isso §9.2 está incompleto como está escrito. O filtro `dx(%)` desligado
+não torna o resultado "o artigo com o filtro off" — o que falta é uma **etapa
+anterior do pipeline**. O objeto medido é: artigo − condicionamento de horário
++ stop do V26. É um híbrido que não aparece em nenhum dos dois papers.
+
+O rodapé no relatório (`backtest/report.py`, bloco `model == "wce"`) diz isso
+com o literal do PDF, para que o número não seja lido como replicação.
+
+### 9.7 Rebaixamento do WCE e correção do `active_model` no caminho vivo
+
+Duas decisões do responsável em 2026-09-26, depois do veredito **REVISE**:
+
+**(a) `active_model` era no-op no caminho vivo.** `StrategyRouter.decide()` tinha
+`execute = v26_decision.signal in ("BUY", "SELL")` fixo e ignorava
+`settings.active_model`. Com o default virado para `"wce"`, o sistema passava a
+*dizer* que executava o WCE e *executava* o V26 — o commit mudava o backtest, o
+log do `main.py` e a docstring, e nada mais. O default voltou para `"v26"`, e o
+`decide()` passou a despachar de verdade, expondo `modelo_ativo` na decisão.
+Coberto por `test_active_model_governs_execution_in_the_live_path`, que
+exercita os dois lados do interruptor.
+
+**(b) WCE rebaixado de primário para sombra.** O WCE é materialmente melhor que
+o V26 nos mesmos dados (PF 0,879 vs 0,795 com custos; DD 2,96% vs 9,66%), mas
+isso não justifica promoção: o artigo reporta **PF 1,0**, ou seja, break-even
+pelos próprios autores, e o que medimos é o híbrido de §9.6, sobre 6 meses e
+um único regime, sem out-of-sample. Promover com edge não medido seria confundir
+"implementação fiel" — que o WCE é — com "estratégia lucrativa", que não está
+estabelecido. `wce_shadow` voltou a `True`.
+
+Nada foi removido: `python -m backtest.engine --model wce` reproduz a
+medição, e `ACTIVE_MODEL=wce` ainda é selecionável. Gates de re-promoção em
+`docs/handoff.md` §13.

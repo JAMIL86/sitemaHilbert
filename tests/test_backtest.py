@@ -263,10 +263,15 @@ def test_engine_never_sees_the_current_or_future_bar():
 
 
 def test_engine_trades_respect_stops_and_are_chronological():
-    """Todo trade fecha no SL, e a ordem de saída segue a ordem cronológica."""
+    """Todo trade fecha no SL, e a ordem de saida segue a ordem cronologica.
+
+    Fixa `model="v26"`: este teste afirma semantica de TRAILING (o SL sobe a
+    favor da posicao), que e regra do V26. O WCE 2014 nao tem trailing — ele
+    sai por travessia de quadrante, coberto em `tests/test_wce.py`.
+    """
     from backtest.engine import BacktestEngine
 
-    result = BacktestEngine().run(_synthetic(600))
+    result = BacktestEngine(model="v26").run(_synthetic(600))
 
     assert result.trades, "a estratégia deve gerar ao menos um trade na série"
     for t in result.trades:
@@ -331,18 +336,23 @@ def test_engine_balance_matches_sum_of_trade_pnl():
     assert result.final_balance == pytest.approx(esperado)
 
 
-def test_save_report_handles_the_flattened_equity_series():
+def test_save_report_handles_the_flattened_equity_series(tmp_path):
     """`to_dict()` achata a curva numa Series — o report não pode exigir 'time'.
 
     Bug real: rodar `python -m backtest.engine` sobre dados do MT5 quebrava
     com KeyError: 'time' só na etapa de salvar o relatório, depois de 12 min
     de backtest. O teste roda o report sobre o payload REAL do engine.
+
+    `tmp_path` é obrigatório: `save_report` nomeia o arquivo pelo SÍMBOLO
+    (`backtest_XAUUSD_VIP.md`), sem o modelo nem a janela. Escrever em
+    `backtest/reports/` daqui sobrescrevia o relatório do backtest real de
+    1 746 trades com 3 trades da fixture sintética.
     """
     from backtest.engine import BacktestEngine
     from backtest.report import save_report
 
     result = BacktestEngine().run(_synthetic(300))
-    saved = save_report(result.to_dict(), output_dir=Path("backtest/reports"))
+    saved = save_report(result.to_dict(), output_dir=tmp_path)
 
     assert saved["markdown"].exists()
     assert saved["figure"].exists()
@@ -356,3 +366,87 @@ def test_engine_equity_curve_is_chronological():
     assert not curve.empty
     assert curve["time"].is_monotonic_increasing
     assert set(curve.columns) == {"time", "balance", "equity"}
+
+
+# --- Testes 8: custos de execução (FASE 3) ----------------------------------
+
+def test_cost_model_math_is_a_hand_worked_example():
+    """Custo por round trip, literado à mão.
+
+    spread 0.15 + slippage 1 pt (0,01) = 0,16 USD de preço, x volume 0,01
+    x 100 oz = 0,16 USD. Comissão 0 (conta VIP).
+    """
+    from backtest.engine import CostModel
+
+    c = CostModel(spread=0.15, slippage_pts=1.0, point_size=0.01, commission=0.0)
+    assert c.per_trade(0.01) == pytest.approx(0.16)
+
+    # Volume 10x -> custo 10x. Comissão entra por lado (2x).
+    assert c.per_trade(0.10) == pytest.approx(1.60)
+    com = CostModel(spread=0.0, slippage_pts=0.0, commission=7.0)
+    assert com.per_trade(0.01) == pytest.approx(0.14)
+
+
+def test_costs_are_charged_by_default_and_strictly_reduce_pnl():
+    """A regra da FASE 3: `--with-costs` default True. Um backtest que não
+    cobra spread é um número que não se reproduz ao vivo."""
+    from backtest.engine import BacktestEngine, DEFAULT_COSTS
+
+    assert DEFAULT_COSTS.enabled is True
+
+    df = _synthetic(600)
+    gratis = BacktestEngine(model="v26", costs=None).run(df)
+    caro = BacktestEngine(model="v26", costs=DEFAULT_COSTS).run(df)
+
+    assert caro.total_costs > 0.0
+    assert caro.final_balance < gratis.final_balance
+    # Mesma logica de sinal -> mesmas entradas; só o dinheiro muda.
+    assert len(caro.trades) == len(gratis.trades)
+    assert all(t.costs > 0 for t in caro.trades)
+    assert all(t.costs == 0 for t in gratis.trades)
+
+
+def test_unknown_model_is_rejected_rather_than_silently_defaulting():
+    from backtest.engine import BacktestEngine
+
+    with pytest.raises(ValueError, match="modelo desconhecido"):
+        BacktestEngine(model="wce2014")
+
+
+def test_wce_backtest_exits_by_quadrant_and_labels_the_sl_as_guardrail():
+    """Saída do WCE é por travessia de quadrante; o SL é guardrail de projeto.
+
+    O rótulo importa tanto quanto o número: sem ele, o relatório apresenta um
+    stop que o artigo não escreve como se fosse regra do PDF.
+    """
+    from backtest.engine import BacktestEngine
+
+    result = BacktestEngine(model="wce").run(_synthetic(600))
+    assert result.trades, "WCE deveria gerar trades na série sintética"
+
+    saidas = {t.exit_reason for t in result.trades}
+    assert saidas <= {"QUADRANT", "SL", "END"}, f"saida inesperada: {saidas}"
+    assert "QUADRANT" in saidas, "a regra de saida do PDF e sair do quadrante"
+
+    for t in result.trades:
+        if t.direction == "BUY":
+            assert t.sl < t.entry_price
+        else:
+            assert t.sl > t.entry_price
+
+
+def test_both_models_run_over_the_same_window_and_report_their_identity():
+    """Comparação V26 vs WCE só vale se janela e contabilidade forem as mesmas."""
+    from backtest.engine import BacktestEngine
+
+    df = _synthetic(600)
+    a = BacktestEngine(model="v26").run(df)
+    b = BacktestEngine(model="wce").run(df)
+
+    assert a.bars_processed == b.bars_processed
+    assert (a.start_date, a.end_date) == (b.start_date, b.end_date)
+    for r in (a, b):
+        assert r.final_balance == pytest.approx(
+            r.initial_balance + sum(t.pnl for t in r.trades)
+        )
+        assert a.model != b.model

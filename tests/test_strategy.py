@@ -335,20 +335,34 @@ def test_v26_trade_management_trailing_and_phase_reversal(mock_dsp_features):
 
 
 def test_wce2014_shadow_signals(mock_dsp_features):
-    """Valida o motor shadow do WCE 2014 em Q1 e Q3."""
+    """WCE 2014: a entrada e a TRAVESSIA de quadrante, nao o nivel.
+
+    ATUALIZADO em 2026-09-26 (ativacao do WCE como modelo primario).
+    Este teste fixava o comportamento SHADOW antigo, que emitia BUY/SELL
+    apenas por estar dentro de Q1/Q3. O PDF diz "whenever the signal CROSSES
+    Quarter 1" — por nivel, o modelo reentra toda barra dentro do quadrante,
+    o que o artigo nao descreve. As regras por travessia tem cobertura propria
+    em `tests/test_wce.py`; aqui fica o contrato do alias `signal()`.
+    """
     strategy = WCE2014Strategy()
 
-    # Q1: I > 0 e Q > 0 -> BUY
+    # Travessia Q4 -> Q1 -> BUY
+    mock_dsp_features.i1[-2] = 2.0
+    mock_dsp_features.q1[-2] = -3.0
     mock_dsp_features.i1[-1] = 2.0
     mock_dsp_features.q1[-1] = 3.0
     assert strategy.signal(mock_dsp_features) == "BUY"
 
-    # Q3: I < 0 e Q < 0 -> SELL
+    # Travessia Q2 -> Q3 -> SELL
+    mock_dsp_features.i1[-2] = -2.0
+    mock_dsp_features.q1[-2] = 3.0
     mock_dsp_features.i1[-1] = -2.0
     mock_dsp_features.q1[-1] = -3.0
     assert strategy.signal(mock_dsp_features) == "SELL"
 
-    # Q2 / Q4 -> HOLD
+    # Q2 / Q4 / staying em Q1 -> HOLD (nenhuma travessia de entrada)
+    mock_dsp_features.i1[-2] = -2.0
+    mock_dsp_features.q1[-2] = 3.0
     mock_dsp_features.i1[-1] = -2.0
     mock_dsp_features.q1[-1] = 3.0
     assert strategy.signal(mock_dsp_features) == "HOLD"

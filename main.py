@@ -18,10 +18,11 @@ from strategy.pdf_strategies import StrategyRouter
 def build() -> dict:
     settings = get_settings()
     logger.info(
-        "Hilberti stub tf={} magic={} dry_run={} v26_exec=True wce_shadow={} h3={} h4={}",
+        "Hilberti stub tf={} magic={} dry_run={} modelo={} wce_shadow={} h3={} h4={}",
         settings.timeframe,
         settings.magic_number,
         settings.dry_run,
+        settings.active_model,
         settings.wce_shadow,
         settings.head3_shadow,
         settings.head4_shadow,

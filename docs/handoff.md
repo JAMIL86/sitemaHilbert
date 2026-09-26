@@ -454,8 +454,34 @@ primário, V26 permanece disponível como comparação (não removido).
 frequência do Hilbert transform), Figura 5 (princípio de rotação nos
 componentes em fase/quadratura), Figura 7 (aplicação em estratégia).
 
-Estado: WCE 2014 ainda em **modo sombra** (`WCE2014Strategy.signal`).
-Ativação, testes, backtest com custos e auditoria são as Fases 1–5.
+### FASE 1 (WCE) — CONCLUÍDA: citações literais extraídas
+
+Citações em `docs/modelos_extraidos.md` §"Gatilhos de entrada — CITAÇÕES
+LITERAIS (2026-09-26)", extraídas de `_extract/WCE2014_pp927-933.txt`.
+**O PDF não foi reprocessado** — `_extract/` já existia da Etapa 1.
+
+Ressalva de extração: o pdfplumber **entrelaça as duas colunas** da página e
+quebra o encoding das fontes (`dx(%)` sai como `dx(cid:1856)(cid:1876)%`).
+As citações foram reconstruídas na ordem de leitura da coluna esquerda, e
+isso está marcado no documento.
+
+### 3 lacunas do PDF + decisões aprovadas
+
+| # | Lacuna | Decisão do responsável |
+|---|---|---|
+| 1 | `Q1={I>0,Q>0}` **não está no WCE** — o artigo define Q1/Q3 geometricamente (Fig. 5/7). O mapeamento algébrico vem do **V26 p.3, seção Hilbert Transform** | ✅ **Autorizado**, documentado com a fonte |
+| 2 | ISOM: o símbolo `dx(%)` aparece, o **valor numérico não existe** no artigo. "low numbers of directional changes" é qualitativo | ✅ Filtro **desativado com WARNING**, nenhum threshold inventado |
+| 3 | WCE **não tem SL nenhum** — única regra escrita é "closed when the signal exits the quarter" | ✅ `calculate_initial_sl` do V26 (1,66 × ATR) como **guardrail de projeto**, rotulado `guardrail_projeto=True` e "não é regra do PDF" |
+
+Detalhamento e citações que provam cada lacuna: `docs/decisoes_tecnicas.md` §7.
+
+### Bug V26 CONFIRMADO no dado real
+
+`losing_trades = 1043` e saídas `SL = 1043` — **coincidem exatamente**. Toda
+saída de stop é perda e todo lucro vem do trailing (703 `TRAIL`). Nenhum trade
+vencedor foi fechado no stop. Combinado com o BE inalcançável (§9), o V26
+está operando como "corta-perda em 1,66 × ATR, sem nenhuma regra de
+realização de lucro ativa".
 
 ## 11. Armadilhas conhecidas
 
@@ -472,3 +498,131 @@ Ver **`docs/decisoes_tecnicas.md`** — cada uma com a evidência que a sustenta
 6. Backtest real PF 0,929 → faixa REVISE. Custos (spread/comissão) ainda não
    modelados.
 
+
+---
+
+## 12. Code review 1.0 do WCE 2014 — 3 hard violations, corrigir ANTES do backtest
+
+Code review de standards contra `b4f6465` (FASE 2/3, ativação do WCE 2014 como
+modelo primário). A spec tem 5 regras não-negociáveis; 4 passam, e há
+**3 violações duras de padrão documentado** que bloqueiam o backtest do WCE.
+
+### 1. CRÍTICO — `backtest_XAUUSD_VIP.md` sobrescreveu o baseline real do V26
+
+O relatório versionado em `backtest/reports/` foi regenerado sobre **3 trades
+sintéticos** (2026-01-05, PF 2.11, Sharpe 35.92), apagando o backtest real de
+**1 746 trades** (PF 0.929, MaxDD 3.87%, Sharpe −1.44) que sustenta
+`decisoes_tecnicas.md` §6.
+
+Causa: `save_report` nomeia o arquivo só pelo **símbolo**
+(`f"backtest_{result.get('symbol','xau')...}"`), sem modelo nem janela. Com
+`active_model="wce"`, rodar o WCE no mesmo símbolo escreve por cima do V26.
+O mesmo arquivo `_equity.html` segue o mesmo caminho.
+
+Isto é exatamente a armadilha que §5 já documentou para o `to_dict()`: um
+artefato formatado por caminho estável, sem identidade do run. E o §6 diz
+que PF 0.929 é a **fonte da decisão de fase** — perdê-la não é perder
+conveniência, é perder a baseline.
+
+### 2. Guardrail de SL ausente no relatório
+
+`decisoes_tecnicas.md` §9.3 exige o rótulo de guardrail em **três lugares**,
+sendo o terceiro "docstring de `initial_sl` **e do relatório de backtest**".
+O código cumpre os dois primeiros (`SL_GUARDRAIL_PROJETO`,
+`metadata["guardrail_projeto"]`), mas `backtest/report.py` não foi tocado:
+`build_markdown_report` não renderiza `model` nem `cost_model_desc`, que já
+chegam prontos em `BacktestResult.to_dict()`. `grep -c guardrail` no `.md`
+versionado = **0**. Um relatório do WCE mostra saídas `SL` sem dizer, uma vez,
+que o artigo não define stop nenhum.
+
+### 3. `slippage_pts=1.0` sem fonte, sob um docstring que nega chutes
+
+`CostModel` afirma: *"Nenhum destes números é um chute"*. Mas dos quatro
+campos, só `spread` e `point_size` têm fonte (medição no terminal, §9.5 e
+`decisoes_tecnicas.md` §4). `slippage_pts = 1.0` é um número escolhido por
+conveniência, e §9.5 só autoriza explicitamente o **fallback de spread 0.15**.
+O docstring também é factualmente torto ao dizer que `commission=0` "não é
+hipótese" enquanto afirma o oposto dos outros campos.
+
+### Situação atual
+
+Corrigido nesta sessão: baseline V26 restaurado a partir de `git show
+b4f6465:backtest/reports/backtest_XAUUSD_VIP.md`; `build_markdown_report`
+passa a renderizar modelo, custos e o aviso de guardrail; `CostModel` deixa de
+negar chutes e rotula `slippage_pts` como hipótese declarada;
+`save_report` inclui modelo e janela no nome do arquivo para que dois
+modelos no mesmo símbolo não voltem a se sobrescrever.
+
+**Pendente de decisão do responsável:** a escolha entre (a) remover
+`slippage_pts` e deixar o spread 0.15 cobrir o custo, ou (b) manter 1.0
+rotulado como hipótese. A instrução recebida cortou no ponto da escolha. A
+recomendação é **(a)**: o spread de 0.15 USD já é ~0.03×ATR, e um slippage
+adicional de 0.01 USD só distorce o PF de um modelo que ainda nem foi
+medido — e some como diferença irrelevante ao lado do spread.
+
+**Ainda não rodar o backtest do WCE** até (a) ou (b) estar decidido, e
+qualquer backtest novo deve ir para `--model wce` com nome de arquivo
+distinto, nunca para `backtest_XAUUSD_VIP.md`.
+
+## 13. WCE 2014 medido, veredito REVISE, rebaixado de primário (2026-09-26)
+
+### 13.1 O que foi medido
+
+Mesmo dado, mesma janela, mesmos custos dos dois modelos. Custos: spread 0,34
+lido do MT5 ao vivo, slippage 1 pt/trade (HIPÓTESE declarada, não medição da
+corretora), comissão 0 (conta VIP).
+
+| | V26 | WCE 2014 | Artigo (Tab. 1) |
+|---|---:|---:|---:|
+| Trades | 1746 (9,72/dia) | 894 (4,98/dia) | — |
+| Win rate | 37,7% | 42,6% | — |
+| Profit factor | 0,795 (0,929 s/ custos) | 0,879 | 1,0 |
+| P&L | -891,61 USD | -268,10 USD | ROI 0,19% |
+| Max DD | 9,66% | 2,96% | — |
+| Sharpe | -4,579 | -1,952 | 0,21 |
+| Custo total | 611,10 USD | 312,90 USD | não declarado |
+| Saídas | SL 1043 / TRAIL 703 | SL 165 / QUADRANT 729 | — |
+
+O WCE ganha do V26 em tudo que é medido. **Nenhum dos dois é lucrativo.** E o
+PF do artigo é 1,0 — pelos próprios autores, break-even, com ROI 0,19% contra
+0,20 de Buy-and-Hold. "Superar o artigo" aqui significa superar o zero.
+
+### 13.2 Veredito: REVISE
+
+`edge-strategy-reviewer`, mais duas achadas que mudam o enquadramento:
+
+**`active_model` não fazia nada no caminho vivo.** `StrategyRouter.decide()`
+tinha `execute = v26_decision.signal in ("BUY","SELL")` fixo. O default "wce"
+mudava o backtest, o log do `main.py` e a docstring — e a execução seguia no
+V26. O sistema dizia uma coisa e fazia outra. Corrigido: `decide()` despacha
+por `settings.active_model` e expõe `modelo_ativo` na decisão.
+
+**O ISOM é ENTRADA do Hilbert, não filtro** — quarta lacuna, maior que as três
+de §7. Detalhe e literal em `decisoes_tecnicas.md` §9.6. Consequência: o WCE
+medido é o artigo **menos o condicionamento de horário**, mais um stop de outra
+fonte. Um híbrido que não está em nenhum dos dois papers.
+
+### 13.3 Decisões do responsável
+
+1. `active_model` corrigido no caminho vivo **e** default revertido para `"v26"`.
+2. `wce_shadow = True` de novo. O WCE fica em sombra até os gates abaixo.
+3. Nada removido: `--model wce` e `ACTIVE_MODEL=wce` continuam funcionando.
+
+### 13.4 Gates para re-promover o WCE
+
+- [ ] ISOM-tempo implementado como **pré-condicionamento** do `i1`/`q1`, ou
+      retirada do enquadramento como "replicação"
+- [ ] ≥ 2 anos de XAUUSD cobrindo mais de um regime
+- [ ] XAGUSD ou outro ativo, para não ser um resultado de um só instrumento
+- [ ] Janela out-of-sample, separada do ajuste
+- [ ] PF > 1 **com custos**, não comparável a um PF provavelmente bruto do artigo
+- [ ] `sl_points` da fórmula do V26 conferido em unidades de MT5
+      (ver `decisoes_tecnicas.md` §4 — correção de `inp_be_pts=500` ainda não
+      aplicada)
+
+### 13.5 Pendências abertas
+
+- **Correção de unidade do BE (500 pts)**: proposta e documentada em §4, nunca
+  aplicada. Continua pendente de decisão.
+- **Slippage de 1 pt**: permanece HIPÓTESE declarada no docstring do `CostModel`.
+  Medir na corretora é a única forma de promoted a medição.

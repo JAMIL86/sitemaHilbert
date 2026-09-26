@@ -36,9 +36,78 @@ from loguru import logger
 
 from ai.feature_engineer import FeatureEngineer
 from config.settings import Settings, get_settings
-from strategy.pdf_strategies import Position, V26Strategy
+from strategy.pdf_strategies import Position, V26Strategy, WCE2014Strategy
 
 MIN_BARS = 200  # mesmo piso usado pelo dashboard para computar features
+
+
+@dataclass(frozen=True)
+class CostModel:
+    """Custos de execução cobrados por trade fechado (round turn).
+
+    Só `spread` é medido: vem de `mt5.symbol_info_tick()` quando o terminal
+    responde (0,34 USD medido no XAUUSD-VIP em 2026-09-26), com fallback
+    declarado de 0,15. `slippage_pts` é uma HIPÓTESE pessimista de 1 ponto
+    por trade, não uma medição da corretora — declarada aqui para que ninguém
+    a leia como dado. `commission` é contrato: a conta 1045989 é VIP, 0.
+
+    - `spread`        preço, USD. Pago UMA vez por trade: entrada no ask e
+                      saída no bid já embutem o spread inteiro.
+    - `slippage_pts`  em PONTOS MT5 (1 pt = 0,01 USD no XAUUSD-VIP medido).
+    - `point_size`    tamanho do ponto, USD. Medido no terminal: 0.01.
+    - `commission`    USD por lote, por lado. VT Markets VIP = 0.
+
+    `commission` NÃO é hipótese: a conta 1045989 é VIP e não cobra comissão.
+    Ela é cobrada por lado (entrada + saída = 2x), como é o real.
+    """
+    spread: float = 0.0
+    slippage_pts: float = 0.0
+    point_size: float = 0.01
+    commission: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.spread or self.slippage_pts or self.commission)
+
+    def per_trade(self, volume: float) -> float:
+        """Custo total, em USD, de um round trip de `volume` lotes."""
+        slip_price = self.slippage_pts * self.point_size
+        return (self.spread + slip_price) * volume * 100.0 + self.commission * volume * 2.0
+
+    def describe(self) -> str:
+        return (
+            f"spread {self.spread:.4f} USD | slippage {self.slippage_pts:.0f} pt "
+            f"({self.slippage_pts * self.point_size:.4f} USD) | "
+            f"comissao {self.commission:.2f} USD/lote/lado"
+        )
+
+
+#: Custos padrão do XAUUSD-VIP. `spread` é sobrescrito por `load_spread()`
+#: quando o MT5 responde; 0.15 é o fallback declarado (não medido ao vivo).
+DEFAULT_COSTS = CostModel(spread=0.15, slippage_pts=1.0, point_size=0.01, commission=0.0)
+
+
+def load_spread(symbol: str = "XAUUSD-VIP") -> float:
+    """Spread corrente do símbolo, ou `None` se o MT5 não responder.
+
+    `None` e não 0.0 de propósito: zero seria afirmar que o ativo é grátis.
+    O caller decide o fallback, e ele fica registrado no relatório.
+    """
+    try:
+        import MetaTrader5 as mt5
+
+        if not mt5.initialize():
+            return None
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None or tick.ask <= 0.0 or tick.bid <= 0.0:
+                return None
+            return float(tick.ask - tick.bid)
+        finally:
+            mt5.shutdown()
+    except Exception as exc:  # MT5 ausente/terminal fechado
+        logger.debug("Spread indisponivel para {}: {}", symbol, exc)
+        return None
 
 
 @dataclass
@@ -54,18 +123,25 @@ class Trade:
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None  # "SL" | "TRAIL" | "END"
     pnl: Optional[float] = None
+    costs: float = 0.0
     partials: list[dict] = field(default_factory=list)
 
-    def close(self, exit_time, exit_price: float, reason: str) -> None:
+    def close(
+        self, exit_time, exit_price: float, reason: str, cost: float = 0.0
+    ) -> None:
         """Fecha o trade e calcula P&L em USD.
 
         XAUUSD: 1.00 lot = 100 oz = 100 USD por 1.00 de variação de preço.
         Com volume em lotes: pnl = delta_preco * volume * 100. As parciais
         entram como P&L próprio e reduzem o volume restante.
+
+        `cost` (spread + slippage + comissão) é subtraído do bruto. Sem
+        custos, o PF de 1746 trades do V26 (0.929) é irreproduzível ao vivo.
         """
         self.exit_time = exit_time
         self.exit_price = exit_price
         self.exit_reason = reason
+        self.costs = cost
 
         delta = (
             exit_price - self.entry_price
@@ -73,7 +149,7 @@ class Trade:
             else self.entry_price - exit_price
         )
         final = delta * self.volume * 100.0
-        self.pnl = final + sum(p["pnl"] for p in self.partials)
+        self.pnl = final + sum(p["pnl"] for p in self.partials) - cost
 
 
 @dataclass
@@ -88,6 +164,9 @@ class BacktestResult:
     equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
     bars_processed: int = 0
     bars_skipped: int = 0
+    model: str = "v26"
+    total_costs: float = 0.0
+    cost_model: Optional[CostModel] = None
 
     def to_dict(self) -> dict:
         """Serializa para dict (consumido por metrics.py e report.py)."""
@@ -105,21 +184,57 @@ class BacktestResult:
             ),
             "bars_processed": self.bars_processed,
             "bars_skipped": self.bars_skipped,
+            "model": self.model,
+            "total_costs": self.total_costs,
+            "cost_model": self.cost_model,
+            "cost_model_desc": self.cost_model.describe() if self.cost_model else "desligado",
         }
 
 
 class BacktestEngine:
-    """Engine de backtest sequencial, sem lookahead bias."""
+    """Engine de backtest sequencial, sem lookahead bias.
 
-    def __init__(self, settings: Optional[Settings] = None, initial_balance: float = 10_000.0):
+    `model` seleciona o motor: "v26" (Precision Accumulation Breakout) ou
+    "wce" (Hilbert + travessia de quadrante, WCE 2014). Os dois implementam a
+    mesma interface de entrada/saída, então o resto do engine é idêntico —
+    é isso que torna a comparação V26 vs WCE justa (mesmos custos, mesma
+    janela, mesma contabilidade).
+
+    `costs=None` desliga a cobrança. O default é COBRAR: um backtest sem
+    spread é um número que não se reproduz ao vivo.
+    """
+
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        initial_balance: float = 10_000.0,
+        model: Optional[str] = None,
+        costs: Optional[CostModel] = DEFAULT_COSTS,
+    ):
         self.settings = settings or get_settings()
-        self.strategy = V26Strategy(self.settings)
+        self.model = (model or self.settings.active_model).lower()
+        if self.model == "v26":
+            self.strategy = V26Strategy(self.settings)
+        elif self.model == "wce":
+            self.strategy = WCE2014Strategy(self.settings)
+        else:
+            raise ValueError(
+                f"modelo desconhecido: {self.model!r} (use 'v26' ou 'wce')"
+            )
+        # Dispatch resolvido UMA vez, aqui. Antes, cada ponto do engine que
+        # precisava saber o modelo testava `self.model == "wce"` — tres
+        # compares que transformavam "adicionar um modelo" em tres edicoes
+        # (Shotgun Surgery). Um terceiro modelo agora entra so nesta tabela.
+        self._entry_hook = self._entry_v26 if self.model == "v26" else self._entry_wce
+        self._manage_hook = self._manage_v26 if self.model == "v26" else self._manage_wce
+        self.costs = costs
         self.feature_eng = FeatureEngineer()
         self.initial_balance = initial_balance
         self.current_balance = initial_balance
         self.open_trade: Optional[Trade] = None
         self.position: Optional[Position] = None
         self.closed_trades: list[Trade] = []
+        self.total_costs = 0.0
         self._ticket = 0
 
     def reset(self) -> None:
@@ -128,6 +243,7 @@ class BacktestEngine:
         self.open_trade = None
         self.position = None
         self.closed_trades = []
+        self.total_costs = 0.0
         self._ticket = 0
 
     def run(self, df: pd.DataFrame, symbol: Optional[str] = None) -> BacktestResult:
@@ -195,6 +311,9 @@ class BacktestEngine:
             equity_curve=pd.DataFrame(equity_rows),
             bars_processed=len(df) - MIN_BARS,
             bars_skipped=skipped,
+            model=self.model,
+            total_costs=self.total_costs,
+            cost_model=self.costs,
         )
         logger.info(
             "Concluído: {} trades, saldo {} -> {}",
@@ -215,16 +334,49 @@ class BacktestEngine:
             logger.debug("Features indisponíveis: {}", exc)
             return None
 
+    def _entry_decision(self, features, symbol: str, price: float):
+        """Entrada do modelo ativo, normalizada para um `SignalDecision`."""
+        return self._entry_hook(features, symbol, price)
+
+    def _entry_wce(self, features, symbol: str, price: float):
+        """WCE 2014 — entrada por travessia de quadrante.
+
+        O artigo não emite SL (`sl_points == 0`): não tem stop. O guardrail de
+        projeto entra AQUI, marcado com `guardrail_projeto=True`, para que
+        nenhum relatório possa apresentá-lo como regra do PDF.
+        """
+        decision = self.strategy.generate_signal(features)
+        if decision.signal in ("BUY", "SELL"):
+            sl_points, sl = self.strategy.initial_sl(
+                current_price=price,
+                atr14=float(features.atr14[-1]),
+                period_smooth=float(features.period_smooth[-1]),
+                direction=decision.signal,
+            )
+            decision.sl_points = sl_points
+            decision.initial_sl = sl
+            decision.price = price
+            decision.symbol = symbol
+        return decision
+
+    def _entry_v26(self, features, symbol: str, price: float):
+        """V26 — o motor ja emite SL, preco e simbolo na propria decisao."""
+        return self.strategy.signal(
+            features, symbol=symbol, current_price=price, current_spread=0.0
+        )
+
+        return self.strategy.signal(
+            features, symbol=symbol, current_price=price, current_spread=0.0
+        )
+
     def _maybe_open(self, features, when, symbol: str, price: float) -> None:
-        """Abre trade quando V26 emite sinal e não há posição aberta.
+        """Abre trade quando o modelo ativo emite sinal e não há posição aberta.
 
         Recebe as MESMAS features já computadas para a barra atual — a janela
         é o passado para as duas decisões, então recalcular só dobraria o
         custo do backtest sem mudar o resultado.
         """
-        decision = self.strategy.signal(
-            features, symbol=symbol, current_price=price, current_spread=0.0
-        )
+        decision = self._entry_decision(features, symbol, price)
         if decision is None or decision.signal not in ("BUY", "SELL"):
             return
         if decision.sl_points <= 0:
@@ -287,10 +439,25 @@ class BacktestEngine:
         return "TRAIL" if moved else "SL"
 
     def _manage(self, features, price: float, when) -> None:
-        """Delega ao V26 e aplica a ação emitindo fill e P&L."""
+        """Aplica a regra de SAÍDA do modelo ativo (dispatch já resolvido)."""
         if self.open_trade is None or self.position is None:
             return
+        self._manage_hook(features, price, when)
 
+    def _manage_wce(self, features, price: float, when) -> None:
+        """WCE 2014: literal do PDF — "closed when the signal exits the quarter".
+
+        Long sai ao deixar Q1, short ao deixar Q3. Sem trailing, sem breakeven,
+        sem parcial: o artigo não escreve nenhum deles.
+        """
+        quad = self.strategy.quadrant(
+            float(features.i1[-1]), float(features.q1[-1])
+        )
+        if self.strategy.should_exit(quad, self.open_trade.direction):
+            self._close(when, price, "QUADRANT")
+
+    def _manage_v26(self, features, price: float, when) -> None:
+        """V26: trailing, break-even e parciais, conforme o PDF V26 §07."""
         action = self.strategy.manage_open_trade(self.position, features, price)
         kind = getattr(action, "action", None)
 
@@ -338,8 +505,14 @@ class BacktestEngine:
     def _close(self, when, price: float, reason: str) -> None:
         if self.open_trade is None:
             return
+        cost = (
+            self.costs.per_trade(self.open_trade.volume)
+            if self.costs is not None and self.costs.enabled
+            else 0.0
+        )
+        self.total_costs += cost
         if self.open_trade.volume > 0:
-            self.open_trade.close(when, price, reason)
+            self.open_trade.close(when, price, reason, cost=cost)
             self.current_balance += self.open_trade.pnl or 0.0
         else:
             # Todo o volume já saiu nas parciais.
@@ -392,11 +565,17 @@ def main() -> int:
     from backtest.metrics import compute_metrics
     from backtest.report import save_report
 
-    parser = argparse.ArgumentParser(description="Backtest V26 sobre historico do MT5.")
+    parser = argparse.ArgumentParser(description="Backtest V26/WCE sobre historico do MT5.")
     parser.add_argument("--data", default=None, help="CSV local; sem ele usa backtest/data/*.csv")
     parser.add_argument("--symbol", default="XAUUSD-VIP")
     parser.add_argument("--balance", type=float, default=10_000.0)
     parser.add_argument("--limit", type=int, default=0, help="Usa apenas as N barras mais recentes")
+    parser.add_argument("--model", default=None, choices=["v26", "wce"],
+                        help="Modelo; sem ele usa settings.active_model")
+    parser.add_argument("--with-costs", dest="with_costs", action=argparse.BooleanOptionalAction,
+                        default=True, help="Cobrar spread+slippage+comissao (default: sim)")
+    parser.add_argument("--spread", type=float, default=None,
+                        help="Spread em USD; sem ele le mt5.symbol_info_tick()")
     args = parser.parse_args()
 
     downloader = HistoricalDataDownloader()
@@ -411,9 +590,29 @@ def main() -> int:
     if args.limit:
         df = df.iloc[-args.limit:]
 
-    result = BacktestEngine(initial_balance=args.balance).run(df, symbol=args.symbol)
+    # Custos: default LIGADO. Medido no terminal quando disponivel.
+    costs = None
+    if args.with_costs:
+        spread = args.spread if args.spread is not None else load_spread(args.symbol)
+        origem = "MT5" if spread is not None and args.spread is None else "fallback"
+        if spread is None:
+            spread = DEFAULT_COSTS.spread
+        costs = CostModel(
+            spread=spread,
+            slippage_pts=DEFAULT_COSTS.slippage_pts,
+            point_size=DEFAULT_COSTS.point_size,
+            commission=DEFAULT_COSTS.commission,
+        )
+        print(f"Custos       {costs.describe()} [spread {origem}]")
+    else:
+        print("Custos       DESLIGADOS (--no-with-costs) — resultado NAO reproduzivel ao vivo")
+
+    result = BacktestEngine(
+        initial_balance=args.balance, model=args.model, costs=costs
+    ).run(df, symbol=args.symbol)
     metrics = compute_metrics(result.to_dict())
 
+    print(f"Modelo       {result.model}")
     print(f"Periodo      {result.start_date} a {result.end_date}")
     print(f"Barrows       {len(df)} (processadas {result.bars_processed}, puladas {result.bars_skipped})")
     print(f"Trades       {metrics['total_trades']}")
@@ -423,6 +622,9 @@ def main() -> int:
     print(f"Max DD       {metrics['max_drawdown_pct']:.2f}%")
     print(f"Sharpe       {metrics['sharpe_ratio']:.3f}")
 
+    print(f"Custo total  {result.total_costs:.2f} USD "
+          f"({result.total_costs / max(1, metrics['total_trades']):.4f} USD/trade)")
+
     sls = [t.sl_points for t in result.trades]
     if sls:
         print(f"SL medio     {sum(sls) / len(sls):.2f} pontos  (min {min(sls):.2f}, max {max(sls):.2f})")
@@ -431,8 +633,11 @@ def main() -> int:
         reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
     print(f"Saidas       {reasons}")
 
-    path = save_report(result.to_dict())
-    print(f"Relatorio    {path}")
+    payload = result.to_dict()
+    sufixo = "custos" if args.with_costs else "sem_custos"
+    out_dir = Path("backtest/reports") / f"{result.model}_{sufixo}"
+    path = save_report(payload, output_dir=out_dir)
+    print(f"Relatorio    {out_dir}")
     return 0
 
 

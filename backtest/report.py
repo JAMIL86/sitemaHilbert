@@ -84,11 +84,91 @@ def build_markdown_report(result: dict, metrics: dict | None = None) -> str:
     m = metrics or compute_metrics(result)
     trades = result.get("trades", [])
 
+    model = result.get("model", "v26")
     lines = [
-        f"# Backtest — {result.get('symbol', '?')}",
+        f"# Backtest — {model.upper()} / {result.get('symbol', '?')}",
         "",
         f"**Periodo:** {result.get('start_date', '?')} a {result.get('end_date', '?')}",
         "",
+        f"**Modelo:** {model}",
+        f"**Custos:** {result.get('cost_model_desc', 'desligado')}"
+        f" — total {result.get('total_costs', 0.0):.2f} USD",
+        "",
+    ]
+
+    if model == "wce":
+        # O stop do WCE nao vem do artigo (decisoes_tecnicas.md §7.3 e §9.3).
+        # Printing-lo sem este aviso faria o relatorio apresentar um numero de
+        # outra fonte como se fosse regra do PDF.
+        lines += [
+            "> **AVISO — o stop loss deste modelo NAO e regra do PDF WCE 2014.**",
+            "> O artigo nao define SL. O stop abaixo e um guardrail de projeto",
+            "> (`calculate_initial_sl` do V26, ATR14 x min(2.0, T/10)), autorizado",
+            "> pelo responsavel em 2026-09-26. Ver `docs/decisoes_tecnicas.md` §9.3.",
+            "> O filtro ISOM tambem esta DESATIVADO: o PDF nao informa o valor de",
+            "> `dx(%)` e nenhum threshold foi inventado (§9.2).",
+            "",
+        ]
+
+        # §9.3: o relatorio tem que QUANTIFICAR o quanto do resultado depende do
+        # guardrail, nao apenas avisar que ele existe. Um aviso sem numero e
+        # decoracao; o numero diz quanto do P&L veio de uma regra que o artigo
+        # nao escreve.
+        #
+        # Contagem por `exit_reason`:
+        #   SL        -> o stop guardrail segurou a posicao. Este P&L e do V26.
+        #   QUADRANT  -> a regra literal do PDF ("closed when the signal exits
+        #                 the quarter") encerrou antes do stop. Logica pura.
+        #   END       -> fim da janela, posicao forcada a fechar.
+        sl_hits = [t for t in trades if t.get("exit_reason") == "SL"]
+        quad_exits = [t for t in trades if t.get("exit_reason") == "QUADRANT"]
+        end_exits = [t for t in trades if t.get("exit_reason") == "END"]
+        sl_pnl = sum(t.get("pnl") or 0.0 for t in sl_hits)
+        quad_pnl = sum(t.get("pnl") or 0.0 for t in quad_exits)
+
+        lines += [
+            "## Guardrails",
+            "",
+            "O WCE 2014 nao define stop. Todo trade deste modelo carrega um stop "
+            "guardrail de projeto na ENTRADA; o que os numeros abaixo separam e "
+            "QUAL REGRA encerrou cada posicao.",
+            "",
+            "| Encerrado por | Fonte da regra | Trades | P&L |",
+            "|---|---|---:|---:|",
+            f"| SL (stop guardrail) | **V26, nao o PDF** | {len(sl_hits)} | ${sl_pnl:+.2f} |",
+            f"| QUADRANT (saiu do quadrante) | **WCE 2014, literal** | {len(quad_exits)} | ${quad_pnl:+.2f} |",
+            f"| END (fim da janela) |—forca de janela | {len(end_exits)} | "
+            f"${sum(t.get('pnl') or 0.0 for t in end_exits):+.2f} |",
+            "",
+        ]
+        total = len(trades) or 1
+        lines += [
+            f"**{len(sl_hits)} de {total} trades ({len(sl_hits) / total * 100:.1f}%) "
+            f"dependem do guardrail** — o P&L deles ($ {sl_pnl:+.2f}) vem de uma "
+            "regra que o artigo nao escreve. Se o WCE for julgado pelo resultado "
+            "total, essa fracao e o que precisa ser lida como artificio de "
+            "risco, nao como edge.",
+            "",
+        ]
+
+    if model == "wce":
+        # §9.6: a lacuna maior que o ISOM-desativado. O artigo usa o ISOM
+        # como ENTRADA do transform, nao como filtro; `feature_engineer.py`
+        # calcula i1/q1 sobre preco bruto. O resultado medido e o artigo
+        # MENOS esse condicionamento — nao "o artigo com o filtro off".
+        lines += [
+            "> **Rodape de fidelidade (decisoes_tecnicas.md §9.6).** O PDF nao usa o",
+            "> ISOM como *filtro* de um sinal Hilbert — usa como **entrada** do",
+            "> transform: \"use that as an input for the Hilbert transform to trade",
+            "> only on times of day where volatility is at a high peak\". Aqui o",
+            "> `i1`/`q1` sao calculados sobre preco bruto, sem o condicionamento de",
+            "> horario. Portanto estes numeros NAO sao replicacao do artigo sao o",
+            "> artigo menos uma etapa do pipeline, mais um stop de outra fonte.",
+            "> Ver tambem: o PF do artigo e 1.0, isto e, break-even.",
+            "",
+        ]
+
+    lines += [
         "## Resumo",
         "",
         "| Metrica | Valor |",
@@ -137,7 +217,12 @@ def save_report(result: dict, output_dir: Path = Path("backtest/reports")) -> di
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics = compute_metrics(result)
 
-    stem = f"backtest_{result.get('symbol', 'xau').replace('-', '_')}"
+    # O nome precisa do MODELO: V26 e WCE produzem o mesmo símbolo e a mesma
+    # janela, e sem isto um backtest sobrescreve o relatório do outro.
+    stem = (
+        f"backtest_{result.get('model', 'v26')}_"
+        f"{result.get('symbol', 'xau').replace('-', '_')}"
+    )
     md_path = output_dir / f"{stem}.md"
     fig_path = output_dir / f"{stem}_equity.html"
 

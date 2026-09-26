@@ -20,8 +20,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Literal, Optional
 import numpy as np
+import pandas as pd
 from loguru import logger
 
 from ai.feature_engineer import DSPFeatures
@@ -604,17 +606,215 @@ class V26Strategy:
 # ==============================================================================
 
 
-class WCE2014Strategy:
-    """Estratégia baseada no artigo WCE 2014 (pp. 927-933).
+class Quadrant(str, Enum):
+    """Quadrante do plano I-Q. Herda de `str` para que o report e os logs
+    continuem imprimindo "Q1" e nao "Quadrant.Q1".
 
-    Executa em MODO SOMBRA (Shadow Mode):
-    - Gera sinais comparativos nos quadrantes Q1 e Q3.
-    - Contabiliza Directional Changes (DC) em buckets horários se fornecidos.
-    - NÃO envia ordens para o MetaTrader 5.
+    `AXIS` cobre o caso em que I ou Q e exatamente zero: nao ha quadrante
+    definido, e inventar um dispararia entrada fora do PDF (§9.1). Ele existe
+    como membro explicito do enum em vez de `None` solto pelo codigo, para que
+    "sem quadrante" seja um valor do dominio e nao um vazamento de `None`.
     """
+
+    Q1 = "Q1"  # I>0, Q>0
+    Q2 = "Q2"  # I<0, Q>0
+    Q3 = "Q3"  # I<0, Q<0
+    Q4 = "Q4"  # I>0, Q<0
+    AXIS = "AXIS"  # I==0 ou Q==0: sinal degenerado
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class WCE2014Strategy:
+    """Motor ATIVO baseado no artigo WCE 2014 (pp. 927-933).
+
+    Ativado como modelo primario em 2026-09-26 (decisao do responsavel).
+    As regras implementadas sao as literais do PDF:
+
+      Entrada (p. 929, secao "Buy and Sell Signals"):
+        "whenever the signal crosses Quarter 1, the price is likely to rise
+        afterwards, until it exits from Quarter 1 to any other quarter."
+        "…whenever the signal crosses Quarter 3, the price is likely to fall
+        afterwards, until it exits from Quarter 3 to any other quarter."
+
+      O verbo e "crosses". A entrada e a TRAVESSIA para dentro de Q1 (a partir
+      de Q4) ou de Q3 (a partir de Q2) — nao o simples fato de estar dentro
+      do quadrante. Implementar por nivel reentraria toda barra dentro de Q1,
+      o que a versao anterior (modo sombra) fazia e o PDF nao diz.
+
+      Mapeamento algebrico dos quadrantes: NAO esta no WCE, que os define
+      geometricamente (Fig. 5 e 7). Vem do V26 p.3, secao Hilbert Transform,
+      por decisao do responsavel — ver `docs/decisoes_tecnicas.md` §7.1.
+        Q1={I>0,Q>0}  Q2={I<0,Q>0}  Q3={I<0,Q<0}  Q4={I>0,Q<0}
+
+    O que o PDF NAO tem, e por isso nao esta aqui:
+      - Stop loss / TP / trailing / break-even: o artigo so diz fechar ao sair
+        do quadrante. Ver `initial_sl` abaixo.
+      - O filtro ISOM precisa do threshold `dx(%)`. O simbolo aparece no
+        artigo; o VALOR nao. Ver `isom_allows`.
+    """
+
+    # O stop deste modelo NAO vem do PDF WCE. `guardrail_projeto=True` existe
+    # para impedir que ele seja lido como regra do artigo em code review.
+    SL_GUARDRAIL_PROJETO = True
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self._isom_warned = False
+        self._v26: Optional[V26Strategy] = None
+
+    # --- quadrantes ---------------------------------------------------------
+
+    @staticmethod
+    def quadrant(i: float, q: float) -> Quadrant:
+        """Classifica (I, Q) no plano I-Q. `AXIS` no eixo (sinal zero)."""
+        if i > 0.0 and q > 0.0:
+            return Quadrant.Q1
+        if i < 0.0 and q > 0.0:
+            return Quadrant.Q2
+        if i < 0.0 and q < 0.0:
+            return Quadrant.Q3
+        if i > 0.0 and q < 0.0:
+            return Quadrant.Q4
+        return Quadrant.AXIS
+
+    @staticmethod
+    def _iq(data: Any) -> tuple[np.ndarray, np.ndarray]:
+        """Aceita DSPFeatures ou DataFrame com colunas i1/q1.
+
+        O engine entrega `DSPFeatures`; a spec da FASE 2 pede `df`. Suportar
+        os dois evita que o modelo se comporte diferente em teste e producao.
+        """
+        if isinstance(data, pd.DataFrame):
+            return data["i1"].to_numpy(dtype=float), data["q1"].to_numpy(dtype=float)
+        return np.asarray(data.i1, dtype=float), np.asarray(data.q1, dtype=float)
+
+    # --- regra de saida (literal do PDF) ------------------------------------
+
+    def should_exit(self, quadrante_atual: Quadrant, side: str) -> bool:
+        """Literal: "…which is closed when the signal exits the quarter."
+
+        Long (entrou em Q1) sai ao deixar Q1; short (entrou em Q3) sai ao
+        deixar Q3. Estar dentro do quadrante de origem mantem a posicao.
+
+        `AXIS` conta como saida: sair do quadrante para o eixo e sair dele.
+        """
+        origem = {
+            "BUY": Quadrant.Q1,
+            "SELL": Quadrant.Q3,
+        }.get(side)
+        if origem is None:
+            # `return False` aqui significaria "nunca sair" — uma posicao
+            # ficaria aberta para sempre por um typo. Falhar e o correto.
+            raise ValueError(f"side invalido: {side!r} (esperado BUY ou SELL)")
+        return quadrante_atual != origem
+
+    # --- filtro ISOM --------------------------------------------------------
+
+    def isom_allows(self, dx_percent: Optional[float] = None) -> bool:
+        """Filtro ISOM do Listing 1: "Filter out data with low numbers of
+        directional changes".
+
+        DESATIVADO por decisão de projeto (§7.2 e §9.2 de
+        `docs/decisoes_tecnicas.md`): o artigo nomeia `dx(%)` mas nao publica
+        o valor do threshold, e "low numbers" e qualitativo. Fixar um numero
+        seria INVENTAR regra, entao o filtro nao rejeita barra nenhuma e emite
+        um WARNING unico.
+
+        O parametro existe para que a calibracao futura tenha um lugar fixo
+        quando — e se — o responsavel fornecer um `dx%` medido. Ate la ele
+        rejeita o valor, em vez de aceitar um numero que o PDF nao sustenta.
+        """
+        if dx_percent is not None:
+            raise ValueError(
+                "ISOM continua desativado: o PDF WCE 2014 nomeia o threshold "
+                "dx(%) mas nao informa seu valor. Calibrar o filtro exige um "
+                "dx% medido, autorizado pelo responsavel (decisoes_tecnicas "
+                "§7.2/§9.2). Nenhum corte sera aplicado."
+            )
+        if not self._isom_warned:
+            self._isom_warned = True
+            logger.warning(
+                "ISOM desativado: o PDF WCE 2014 nomeia o threshold dx(%) "
+                "mas nao informa seu valor. Nenhum corte sera aplicado."
+            )
+        return True
+
+    # --- guardrail de risco (NAO e regra do PDF) ---------------------------
+
+    def initial_sl(
+        self,
+        current_price: float,
+        atr14: float,
+        period_smooth: float,
+        direction: Literal["BUY", "SELL"],
+    ) -> tuple[float, float]:
+        """Stop inicial = `V26Strategy.calculate_initial_sl`.
+
+        guardrail_projeto=True: o WCE 2014 nao define stop loss nenhum. Sem
+        isto o trade atravessa o ciclo inteiro do Hilbert e o Max DD do
+        backtest sai sem teto. Formula e a do V26 p.3, reaproveitada.
+        """
+        # Uma instancia so: construir V26Strategy a cada barra custa caro
+        # num backtest de 35k barras e o objeto nao tem estado.
+        if self._v26 is None:
+            self._v26 = V26Strategy(self.settings)
+        return self._v26.calculate_initial_sl(
+            current_price, atr14, period_smooth, direction
+        )
+
+    @staticmethod
+    def _hold(reasons: list[str]) -> SignalDecision:
+        """HOLD sem preco: o WCE decide por quadrante, nao por nivel de preco."""
+        return SignalDecision(
+            signal="HOLD", symbol="", price=0.0, sl_points=0.0, initial_sl=0.0,
+            reasons=reasons,
+        )
+
+    # --- entrada ------------------------------------------------------------
+
+    def generate_signal(
+        self,
+        df: Any,
+        dx_percent: Optional[float] = None,
+    ) -> SignalDecision:
+        """Decisao de entrada por TRAVESSIA de quadrante (Q4->Q1, Q2->Q3)."""
+        i1, q1 = self._iq(df)
+        n = len(i1)
+        if n < 2:
+            return self._hold(["Historico insuficiente para classificar quadrante"])
+
+        quad_prev = self.quadrant(float(i1[-2]), float(q1[-2]))
+        quad_curr = self.quadrant(float(i1[-1]), float(q1[-1]))
+
+        if not self.isom_allows(dx_percent):
+            return self._hold(["ISOM filtrou a barra"])
+
+        decision, reason = "HOLD", "sem travessia de quadrante"
+        if quad_prev == "Q4" and quad_curr == "Q1":
+            decision = "BUY"
+            reason = "travessia Q4 -> Q1 (literal WCE p.929)"
+        elif quad_prev == "Q2" and quad_curr == "Q3":
+            decision = "SELL"
+            reason = "travessia Q2 -> Q3 (literal WCE p.929)"
+
+        return SignalDecision(
+            signal=decision,
+            symbol="",
+            price=0.0,
+            sl_points=0.0,
+            initial_sl=0.0,
+            reasons=[reason],
+            metadata={
+                "quadrant_prev": quad_prev,
+                "quadrant_curr": quad_curr,
+                "guardrail_projeto": self.SL_GUARDRAIL_PROJETO,
+                "isom_ativo": dx_percent is not None,
+            },
+        )
+
+    # --- compatibilidade com o motor V26 ------------------------------------
 
     def signal(
         self,
@@ -623,23 +823,9 @@ class WCE2014Strategy:
         symbol: str = "XAUUSD",
         current_price: Optional[float] = None,
     ) -> Signal:
-        """Calcula o sinal shadow do modelo WCE 2014."""
-        n_bars = len(features.i1)
-        if n_bars < 2:
-            return "HOLD"
+        """Alias em nivel para o `StrategyRouter` legado (shadow)."""
+        return self.generate_signal(features).signal
 
-        i_curr, q_curr = float(features.i1[-1]), float(features.q1[-1])
-
-        # Quadrante 1: I > 0 e Q > 0 -> BUY
-        if i_curr > 0.0 and q_curr > 0.0:
-            logger.debug("WCE2014 Shadow: Quadrante 1 detectado -> BUY")
-            return "BUY"
-        # Quadrante 3: I < 0 e Q < 0 -> SELL
-        elif i_curr < 0.0 and q_curr < 0.0:
-            logger.debug("WCE2014 Shadow: Quadrante 3 detectado -> SELL")
-            return "SELL"
-
-        return "HOLD"
 
 
 # ==============================================================================
@@ -650,8 +836,12 @@ class WCE2014Strategy:
 class StrategyRouter:
     """Orquestrador central de sinais de trading do Hilberti.
 
-    - V26 decide a execução real.
-    - WCE 2014 e Cabeças de ML (3 e 4) rodam em Shadow Mode e registram logs.
+    - O modelo ATIVO (`settings.active_model`) decide a execução real e o
+      campo `modelo_ativo` da decisão — os dois não podem divergir.
+      Padrão "v26" desde 2026-09-26; o WCE 2014 fica acessível por
+      `ACTIVE_MODEL=wce` e por `--model wce` no backtest.
+    - O modelo inativo continua sendo calculado e reportado como sombra.
+    - As cabeças de ML (3 e 4) seguem em Shadow Mode e registram logs.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -678,33 +868,44 @@ class StrategyRouter:
             current_spread=current_spread,
             bars_since_last_entry=bars_since_last_entry,
         )
-        wce_signal = self.wce.signal(
-            features=features,
-            patterns=patterns,
-            symbol=symbol,
-            current_price=current_price,
-        )
+        wce_decision = self.wce.generate_signal(features)
+        wce_signal = wce_decision.signal
 
-        execute = v26_decision.signal in ("BUY", "SELL")
+        # `active_model` decide o que EXECUTA. Até 2026-09-26 este valor era
+        # lido só pelo backtest: o `decide()` executava o V26 fixo, de modo que
+        # um default "wce" produzia um sistema que dizia executar o WCE e
+        # executava o V26. O outro modelo continua sendo calculado e logado.
+        if self.settings.active_model == "wce":
+            ativa = wce_decision
+            sombra_v26 = v26_decision
+        else:
+            ativa = v26_decision
+            sombra_v26 = None
+
+        execute = ativa.signal in ("BUY", "SELL")
 
         logger.info(
-            "StrategyRouter [{}] | Exec_V26: {} | Shadow_WCE: {} | Shadow_ML: {} | Execute: {}",
+            "StrategyRouter [{}] | Ativo_{}: {} | Sombra: {} | Shadow_ML: {} | Execute: {}",
             symbol,
-            v26_decision.signal,
-            wce_signal,
+            self.settings.active_model.upper(),
+            ativa.signal,
+            wce_signal if sombra_v26 is not None else v26_decision.signal,
             shadow_ml,
             execute,
         )
 
-        return {
-            "signal": v26_decision.signal,
+        out: dict[str, Any] = {
+            "signal": ativa.signal,
             "symbol": symbol,
-            "price": v26_decision.price,
-            "sl_points": v26_decision.sl_points,
-            "initial_sl": v26_decision.initial_sl,
-            "reasons": v26_decision.reasons,
-            "metadata": v26_decision.metadata,
+            "price": ativa.price,
+            "sl_points": ativa.sl_points,
+            "initial_sl": ativa.initial_sl,
+            "reasons": ativa.reasons,
+            "metadata": ativa.metadata,
+            "modelo_ativo": self.settings.active_model,
             "shadow_wce": wce_signal,
+            "shadow_v26": sombra_v26.signal if sombra_v26 is not None else None,
             "shadow_ml": shadow_ml,
             "execute": execute,
         }
+        return out

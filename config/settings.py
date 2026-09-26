@@ -82,6 +82,19 @@ class Settings(BaseSettings):
     max_spread_atr_factor_xag: float = 0.20
     spread_limit_manual: Optional[float] = None  # TODO: calibrar via backtest
 
+    # --- Modelo ativo ---
+    # "v26" = V26 Precision Accumulation Breakout — padrão.
+    # "wce" = WCE 2014 (Hilbert + ISOM). Implementado e testado, mas
+    #         REBAIXADO de primário em 2026-09-26: o WCE medido é o artigo
+    #         MENOS o ISOM usado como ENTRADA do Hilbert (não como filtro —
+    #         ver docs/decisoes_tecnicas.md §9.6), mais um stop de outra
+    #         fonte. O PDF reporta PF 1.0, ou seja, break-even. Ver
+    #         docs/handoff.md §13 para os gates de re-promoção.
+    # Nenhum dos dois é removido: `python -m backtest.engine --model wce`.
+    active_model: Literal["wce", "v26"] = Field(
+        default="v26", alias="ACTIVE_MODEL"
+    )
+
     # --- Gestão V26 §07 (sem TP fixo) ---
     atr_period: int = 14
     sl_atr_cap: float = 2.0  # SL_pts = ATR14 * min(2.0, T_final/10)
@@ -113,7 +126,10 @@ class Settings(BaseSettings):
     isom_ml_target_winrate: float = 0.58
     head3_shadow: bool = True  # calcula e loga; NÃO filtra entrada
     head4_shadow: bool = True  # calcula e loga; NÃO filtra entrada
-    wce_shadow: bool = True  # WCE 2014 loga sinal; NÃO executa
+    # WCE 2014 é medido e testado, mas não é o que executa: em 2026-09-26 o
+    # edge-strategy-reviewer o rebaixou de primário (handoff §13). A flag
+    # volta a True porque o log do router depende dela para dizer a verdade.
+    wce_shadow: bool = True
 
     # --- Loop ---
     poll_seconds: float = 1.0
