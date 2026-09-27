@@ -850,3 +850,111 @@ formas de tornear o mesmo mercado sem braço. A conclusão da §14.5 se
 confirma com mais força: nesta janela, com estes custos, não há edge no
 conjunto — e o take profit é a mudança que mais destrói valor, porque opera
 abaixo do custo de transação.
+
+## 15. VEREDICTO FINAL — nenhum dos dois PDFs tem edge em XAUUSD M5 (2026-09-27)
+
+Encerramento da investigação. Esta seção é o número para levar adiante; as
+§9–14 contam como cada número foi medido e quantas vezes foi errado antes de
+virar certo.
+
+### 15.1 O veredicto
+
+**Os PDFs (V26 e WCE 2014) NÃO têm edge comprovado em XAUUSD M5** — nenhum,
+nesta janela, com estes custos medidos.
+
+Não é "edge fraco". É ausência de edge: as duas estratégias pagam spread e
+slippage para entrar e sair mais vezes do que o movimento do preço paga de
+volto.
+
+| Modelo | Trades | WR | PF | P&L | MaxDD | Sharpe |
+|---|---:|---:|---:|---:|---:|---:|
+| V26 (baseline, guardrail ATR) | 1746 | 37,7% | 0,795 | −891,61 | 9,66% | −4,58 |
+| WCE com guardrail (`wce`) | 894 | 42,6% | 0,880 | −268,10 | 2,96% | −1,95 |
+| **A — artigo puro** | 894 | 44,4% | **0,887** | −257,81 | 3,59% | −1,70 |
+| B — A + TP 50 pts | 894 | 89,5% | 0,243 | −374,05 | 3,75% | −8,58 |
+| C — B + SL 250 pts | 894 | 60,2% | 0,081 | −916,00 | 9,16% | −30,09 |
+
+Leitura: **nenhum modelo chega a PF 1,0.** O melhor é A (0,887), e A é
+exatamente o artigo sem nada acrescentado — ou seja, o WCE 2014 tal como
+escrito, neste símbolo, nesta janela, com estes custos.
+
+O paper original (Kablan & Falzon 2014, pp. 927–933) reporta **PF 1,0** —
+isto é, o próprio artigo é break-even. Ver §14.1 e o rodapé de fidelidade
+§9.6: o ISOM é usado no artigo como *entrada* do transform, e aqui
+`i1`/`q1` são calculados sobre preço bruto. Ou seja, estes números são o
+artigo **menos** uma etapa do pipeline. A conclusão não depende disso: um
+artigo break-even, mesmo replicado perfeitamente, não gera lucro.
+
+### 15.2 Por que nenhum TP mencionado aqui funciona
+
+O take profit de 50 pts (0,50 USD) é **menor que o custo de round-trip
+medido (0,35 USD)**. Enquanto o alvo ficar abaixo de ~35 pts, acrescentar TP a
+esta estratégia é matematicamente incapaz de produzir lucro, qualquer que seja
+o win rate — não é defeito de implementação nem do WCE, é propriedade do
+símbolo com o custo medido.
+
+É por isso que B tem 89,5% de acerto e PF 0,243: cada vitória rende 0,15 USD
+líquido, e o acerto alto não paga as posições perdedoras. O take profit
+truncou a cauda direita que fazia A "só" ruim.
+
+E C (TP 50 / SL 250) é risco 5:1 contra ganho 1:1 em termos de ponto — exige
+83,3% de acerto para empatar, tem 60,2%. PF 0,081.
+
+Qualquer TP futuro tem de ser testado **acima de 35 pts** ou não vale a medição.
+
+### 15.3 O que sobrevive: a infraestrutura
+
+Independentemente do resultado, o que foi construído é reutilizável — e foi
+construído para ser. **126 testes** (125 verdes; a única falha é o
+`test_mt5_headway_connection`, que conecta de fato ao MT5 e falha só porque a
+conta é da VT Markets e não da Headway — ver §15.5), dashboard Streamlit
+somente-leitura, conector MT5 com 3 tentativas, backtester com modelo de
+custos, feature engineering (Hilbert/ATR/ISOM), suíte de variantes e
+relatórios com rastreabilidade de qual regra encerrou cada trade.
+
+O dashboard e o backtester foram escritos para *conseguir* mostrar que uma
+estratégia não funciona, com a distinção de fonte da regra em cada número. Isso
+serviu, e vai servir para a próxima hipótese.
+
+### 15.4 PRÓXIMA SESSÃO — a decisão é do responsável
+
+Três caminhos, nenhum conhecido como certo:
+
+- **(A) Pivotar para outra estratégia.** Abandonar Hilbert/ISOM como eixo e
+  procurar uma classe de hipótese diferente. Custa: recomeçar a pesquisa.
+- **(B) Calibrar os parâmetros existentes** dentro das famílias que os PDFs já
+  descrevem (filtro ISOM com `dx(%)` real, thresholds, variantes de
+  dimensionamento). Custa: tempo, e a §14.7 mostra que acrescentar parâmetro
+  piorou monotonicamente — calibrar precisa ser *remover* degrees of freedom,
+  não adicionar.
+- **(C) Abandonar XAUUSD M5** e levar a mesma infraestrutura para outro
+  símbolo/timeframe. Custa: nova coleta de dados, mas o pipeline já faz isso
+  (`backtest/downloader.py`).
+
+Recomendação honesta: **(A)**. O paper de origem é break-even e a nossa
+replicação é pior que break-even; calibrar em torno de um número que já é
+1,0 é otimizar sobre ruído. Mas a decisão é do responsável e o dado de apoio
+está acima.
+
+### 15.5 Estado da suíte e pendênciasknown
+
+- `python -m pytest tests/ -q --tb=short` → **125 passed, 1 failed (499s)**.
+- A falha é `tests/test_mt5_connection.py::test_mt5_headway_connection`:
+  `assert "Headway" in acc_info["server"]` contra `VTMarkets-Demo`. A conexão
+  MT5 funciona (conta 1045989 DEMO, saldo 19.016,45 USD); falha a asserção
+  sobre o nome do broker. **Não corrigida** — requer decisão sobre renomear a
+  asserção ou reconectar a uma conta Headway. Fora do escopo do encerramento.
+- `docs/wce2014_source_of_truth.md` §3.2 e §5 ainda afirmam o "+$953,52",
+  refutado na §14.1. **Não corrigido** — fora do escopo deste encerramento.
+- Code review do diff: 7 achados registrados, nenhum corrigido. Os dois de
+  dados, se tratados: (1) variante `--no-with-costs` sobrescreve o relatório
+  `--with-costs` (mesmo diretório, sem sufixo); (2) dois testes em
+  `tests/test_wce_variants.py` passam por vácuo quando a lista de trades vem
+  vazia, justamente o defeito que aquele arquivo existe para eliminar.
+
+### 15.6 Invariantes de segurança — inalteradas
+
+`dry_run=True`, `live_trading=False`, `allowed_symbols=('XAUUSD','XAGUSD')`,
+`active_model='v26'`. Nenhum arquivo desta investigação tocou `dry_run`,
+`core/executor.py` nem `allowed_symbols`. O backtester é simulação pura:
+`Executor` nunca importado, `order_send` nunca chamado.
