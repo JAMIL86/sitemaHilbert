@@ -15,6 +15,17 @@ from loguru import logger
 
 from backtest.metrics import compute_metrics
 
+#: Rotulos de quem encerrou cada posicao -> de que documento a REGRA vem.
+#: A coluna "Fonte da regra" do relatório existe para que um número de outra
+#: fonte nunca seja lido como regra do PDF.
+EXIT_SOURCES = {
+    "SL": "**V26, nao o PDF**",
+    "TRAIL": "**V26, nao o PDF**",
+    "QUADRANT": "**WCE 2014, literal**",
+    "TP": "**parametro de pesquisa, nao o PDF**",
+    "END": "—forca de janela",
+}
+
 # Paleta validada 6/6 (light): #1D4ED8, #B45309, #7C3AED
 PALETTE = {
     "equity": "#1D4ED8",
@@ -96,19 +107,53 @@ def build_markdown_report(result: dict, metrics: dict | None = None) -> str:
         "",
     ]
 
-    if model == "wce":
-        # O stop do WCE nao vem do artigo (decisoes_tecnicas.md §7.3 e §9.3).
-        # Printing-lo sem este aviso faria o relatorio apresentar um numero de
-        # outra fonte como se fosse regra do PDF.
-        lines += [
-            "> **AVISO — o stop loss deste modelo NAO e regra do PDF WCE 2014.**",
-            "> O artigo nao define SL. O stop abaixo e um guardrail de projeto",
-            "> (`calculate_initial_sl` do V26, ATR14 x min(2.0, T/10)), autorizado",
-            "> pelo responsavel em 2026-09-26. Ver `docs/decisoes_tecnicas.md` §9.3.",
-            "> O filtro ISOM tambem esta DESATIVADO: o PDF nao informa o valor de",
-            "> `dx(%)` e nenhum threshold foi inventado (§9.2).",
-            "",
-        ]
+    if model.startswith("wce"):
+        # Import tardio: `backtest.engine` importa este modulo dentro de main(),
+        # entao um import de topo aqui viraria ciclo.
+        from backtest.engine import WCE_VARIANTS
+
+        variant = WCE_VARIANTS.get(model)
+
+        if variant is None:
+            # O stop do WCE nao vem do artigo (decisoes_tecnicas.md §7.3 e §9.3).
+            # Printing-lo sem este aviso faria o relatorio apresentar um numero de
+            # outra fonte como se fosse regra do PDF.
+            lines += [
+                "> **AVISO — o stop loss deste modelo NAO e regra do PDF WCE 2014.**",
+                "> O artigo nao define SL. O stop abaixo e um guardrail de projeto",
+                "> (`calculate_initial_sl` do V26, ATR14 x min(2.0, T/10)), autorizado",
+                "> pelo responsavel em 2026-09-26. Ver `docs/decisoes_tecnicas.md` §9.3.",
+                "> O filtro ISOM tambem esta DESATIVADO: o PDF nao informa o valor de",
+                "> `dx(%)` e nenhum threshold foi inventado (§9.2).",
+                "",
+            ]
+        else:
+            # Variante: o SL/TP sao parametros de pesquisa, nao regra de artigo.
+            # Um TP de 50 pts lido sem este aviso pareceria vir do PDF.
+            tp_txt = f"take profit fixo de {variant.tp_points:.0f} pontos" if variant.use_tp else "sem take profit"
+            sl_txt = (
+                f"stop fixo de {variant.sl_points:.0f} pontos" if variant.use_sl
+                else "sem stop loss"
+            )
+            linhas = [
+                f"> **VARIANTE DE PESQUISA — {model}.** {variant.description}",
+                ">",
+                f"> O WCE 2014 define APENAS a saida (\"closed when the signal "
+                "exits the quarter\"). O que for usado alem disso aqui — "
+                f"{tp_txt}, {sl_txt} — NAO e regra do artigo: sao parametros "
+                "de pesquisa, escolhidos para medir o efeito de cada um. Um "
+                "resultado bom nesta variante nao valida o WCE 2014; valida "
+                "que estes numeros funcionam NESTES dados.",
+                "",
+            ]
+            if variant.use_sl and variant.sl_points:
+                linhas += [
+                    "> O stop desta variante e FIXO, e nao o `calculate_initial_sl` "
+                    "ATR do V26: um stop que varia por barra nao distinguiria o "
+                    "efeito do SL do efeito da formula ATR.",
+                    "",
+                ]
+            lines += linhas
 
         # §9.3: o relatorio tem que QUANTIFICAR o quanto do resultado depende do
         # guardrail, nao apenas avisar que ele existe. Um aviso sem numero e
@@ -116,40 +161,71 @@ def build_markdown_report(result: dict, metrics: dict | None = None) -> str:
         # nao escreve.
         #
         # Contagem por `exit_reason`:
-        #   SL        -> o stop guardrail segurou a posicao. Este P&L e do V26.
+        #   SL        -> o stop segurou a posicao. Este P&L e de outra fonte.
         #   QUADRANT  -> a regra literal do PDF ("closed when the signal exits
-        #                 the quarter") encerrou antes do stop. Logica pura.
+        #                 the quarter") encerrou a posicao. Logica pura.
+        #   TP        -> alvo fixo de pesquisa.
         #   END       -> fim da janela, posicao forcada a fechar.
-        sl_hits = [t for t in trades if t.get("exit_reason") == "SL"]
-        quad_exits = [t for t in trades if t.get("exit_reason") == "QUADRANT"]
-        end_exits = [t for t in trades if t.get("exit_reason") == "END"]
-        sl_pnl = sum(t.get("pnl") or 0.0 for t in sl_hits)
-        quad_pnl = sum(t.get("pnl") or 0.0 for t in quad_exits)
+        by_reason: dict[str, list[dict]] = {}
+        for t in trades:
+            by_reason.setdefault(t.get("exit_reason") or "?", []).append(t)
 
-        lines += [
+        ordem = ["SL", "TRAIL", "TP", "QUADRANT", "END"]
+        presentes = [r for r in ordem if r in by_reason] + [
+            r for r in by_reason if r not in ordem
+        ]
+
+        nao_pdf = {"SL", "TRAIL", "TP"}
+        fora = [t for r in nao_pdf for t in by_reason.get(r, [])]
+        pnl_pdf = sum(
+            t.get("pnl") or 0.0 for t in trades
+            if (t.get("exit_reason") or "") not in nao_pdf
+        )
+        pnl_fora = sum(t.get("pnl") or 0.0 for t in fora)
+
+        linhas_guard = [
             "## Guardrails",
             "",
-            "O WCE 2014 nao define stop. Todo trade deste modelo carrega um stop "
-            "guardrail de projeto na ENTRADA; o que os numeros abaixo separam e "
-            "QUAL REGRA encerrou cada posicao.",
+            "O que os numeros abaixo separam e QUAL REGRA encerrou cada "
+            "posicao — e de que documento ela vem.",
             "",
             "| Encerrado por | Fonte da regra | Trades | P&L |",
             "|---|---|---:|---:|",
-            f"| SL (stop guardrail) | **V26, nao o PDF** | {len(sl_hits)} | ${sl_pnl:+.2f} |",
-            f"| QUADRANT (saiu do quadrante) | **WCE 2014, literal** | {len(quad_exits)} | ${quad_pnl:+.2f} |",
-            f"| END (fim da janela) |—forca de janela | {len(end_exits)} | "
-            f"${sum(t.get('pnl') or 0.0 for t in end_exits):+.2f} |",
-            "",
         ]
+        for r in presentes:
+            grupo = by_reason[r]
+            pnl = sum(t.get("pnl") or 0.0 for t in grupo)
+            rotulo = {
+                "SL": "SL (stop guardrail)",
+                "TRAIL": "TRAIL (trailing)",
+                "TP": f"TP (alvo de {variant.tp_points:.0f} pts)" if variant else "TP (alvo)",
+                "QUADRANT": "QUADRANT (saiu do quadrante)",
+                "END": "END (fim da janela)",
+            }.get(r, r)
+            linhas_guard.append(
+                f"| {rotulo} | {EXIT_SOURCES.get(r, r)} | {len(grupo)} | ${pnl:+.2f} |"
+            )
+        linhas_guard.append("")
         total = len(trades) or 1
-        lines += [
-            f"**{len(sl_hits)} de {total} trades ({len(sl_hits) / total * 100:.1f}%) "
-            f"dependem do guardrail** — o P&L deles ($ {sl_pnl:+.2f}) vem de uma "
-            "regra que o artigo nao escreve. Se o WCE for julgado pelo resultado "
-            "total, essa fracao e o que precisa ser lida como artificio de "
-            "risco, nao como edge.",
-            "",
-        ]
+        if fora:
+            linhas_guard += [
+                f"**{len(fora)} de {total} trades ({len(fora) / total * 100:.1f}%) "
+                f"dependem de uma regra que o artigo nao escreve** — P&L "
+                f"${pnl_fora:+.2f}. Se esta variante for julgada pelo resultado "
+                "total, essa fracao e o que precisa ser lida como parametro de "
+                "pesquisa, nao como edge do WCE 2014.",
+                "",
+            ]
+        else:
+            linhas_guard += [
+                f"**Nenhum trade dependeu de stop nem de take profit.** Todos os "
+                f"{total} foram encerrados pela regra literal do PDF "
+                f"(sair do quadrante) ou por fim de janela — P&L "
+                f"${pnl_pdf:+.2f}. Este e o numero mais proximo do artigo "
+                "possivel neste pipeline.",
+                "",
+            ]
+        lines += linhas_guard
 
     if model == "wce":
         # §9.6: a lacuna maior que o ISOM-desativado. O artigo usa o ISOM

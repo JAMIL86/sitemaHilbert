@@ -11,9 +11,22 @@ GESTÃO DE POSIÇÃO (fonte única de verdade):
   `V26Strategy.manage_open_trade()`, que aplica as regras do PDF: breakeven
   (+500 pts), parciais automáticas (30%/30%), trailing AGC adaptativo e saída
   por inversão de fase 180°. O PDF declara explicitamente "SEM Take Profit
-  fixo" — por isso não existe TP, e nenhum alvo de preço é inventado.
+  fixo" — por isso não existe TP no caminho V26, e nenhum alvo de preço é
+  inventado.
 - O engine só simula o preenchimento: se o preço alcançar o SL vigente, o
   trade fecha.
+
+VARIANTES WCE (`wce_quadrant*`, ver `WCE_VARIANTS`):
+- O WCE 2014 define a SAÍDA ("closed when the signal exits the quarter") e
+  NADA mais: sem SL, sem TP. O modelo `wce` carrega um stop guardrail
+  herdado do V26, que é de outra fonte que o artigo.
+- As variantes isolam quanto do resultado depende desse stop, e medem o que
+  acontece se um alvo fixo for acrescentado. `tp_points` e `sl_points`
+  fixos nestas variantes NÃO são regra do PDF — todo relatório que as
+  imprime diz isso explicitamente (ver `WCE_VARIANT_INFO` em report.py).
+- Empate na mesma barra: se SL e TP forem ambos alcancados no MESMO M5, o
+  SL vence. Sem tick intrabar não há sequencia observavel, e a leitura
+  otimista inflaria o P&L de todas as variantes.
 
 PARÂMETROS:
 - Todos vêm de `settings` ou de `SignalDecision`. Nada é inventado aqui.
@@ -87,6 +100,19 @@ class CostModel:
 DEFAULT_COSTS = CostModel(spread=0.15, slippage_pts=1.0, point_size=0.01, commission=0.0)
 
 
+#: As variantes WCE vivem em `strategy/experimental_wce.py` (bloco de
+#: pesquisa, separado do backtester). Reexportadas aqui porque o `choices`
+#: do argparse e `backtest/report.py` ja usavam estes nomes neste modulo.
+from strategy.experimental_wce import (  # noqa: E402
+    POINTS_TO_PRICE,
+    WCE_VARIANTS,
+    WCEQuadrantOnly,
+    WCEQuadrantTP,
+    WCEQuadrantTPSL,
+    WCEVariant,
+)
+
+
 def load_spread(symbol: str = "XAUUSD-VIP") -> float:
     """Spread corrente do símbolo, ou `None` se o MT5 não responder.
 
@@ -119,9 +145,11 @@ class Trade:
     volume: float
     sl: float
     sl_points: float
+    tp: Optional[float] = None       # 0/None = sem take profit (padrao V26/WCE)
+    tp_points: float = 0.0
     exit_time: Optional[object] = None
     exit_price: Optional[float] = None
-    exit_reason: Optional[str] = None  # "SL" | "TRAIL" | "END"
+    exit_reason: Optional[str] = None  # "SL" | "TRAIL" | "END" | "QUADRANT" | "TP"
     pnl: Optional[float] = None
     costs: float = 0.0
     partials: list[dict] = field(default_factory=list)
@@ -213,13 +241,18 @@ class BacktestEngine:
     ):
         self.settings = settings or get_settings()
         self.model = (model or self.settings.active_model).lower()
+        # `None` para v26/wce (que tem seu proprio SL); o objeto da variante
+        # para os `wce_quadrant*`, que sobrescrevem os parametros de saida.
+        self.variant: Optional[WCEVariant] = WCE_VARIANTS.get(self.model)
+
         if self.model == "v26":
             self.strategy = V26Strategy(self.settings)
-        elif self.model == "wce":
+        elif self.model == "wce" or self.variant is not None:
             self.strategy = WCE2014Strategy(self.settings)
         else:
             raise ValueError(
-                f"modelo desconhecido: {self.model!r} (use 'v26' ou 'wce')"
+                f"modelo desconhecido: {self.model!r} (use 'v26', 'wce' ou "
+                f"uma variante: {', '.join(WCE_VARIANTS)})"
             )
         # Dispatch resolvido UMA vez, aqui. Antes, cada ponto do engine que
         # precisava saber o modelo testava `self.model == "wce"` — tres
@@ -284,10 +317,15 @@ class BacktestEngine:
 
             price = float(bar["close"])
 
-            # 1) Fecha por stop ANTES de gerenciar: se o preço já matou a
-            #    posição, a gestão da barra é irrelevante.
+            # 1) Fecha por stop OU take profit ANTES de gerenciar: se o preço
+            #    já matou a posição, a gestão da barra é irrelevante.
+            #    SL é testado antes do TP de propósito: se ambos forem
+            #    alcancados no MESMO M5, a sequencia real é desconhecida sem
+            #    tick, e escolher o TP inflaria o P&L.
             if self._stop_hit(bar):
                 self._close(bar["time"], self.open_trade.sl, self._exit_reason())
+            elif self._target_hit(bar):
+                self._close(bar["time"], self.open_trade.tp, "TP")
             else:
                 self._manage(features, price, bar["time"])
 
@@ -344,17 +382,43 @@ class BacktestEngine:
         O artigo não emite SL (`sl_points == 0`): não tem stop. O guardrail de
         projeto entra AQUI, marcado com `guardrail_projeto=True`, para que
         nenhum relatório possa apresentá-lo como regra do PDF.
+
+        Numa variante (`wce_quadrant*`) os parametros de saida sao os da
+        variante, NAO o guardrail ATR: `sl_points` e `tp_points` sao fixos e
+        vem do `WCEVariant`, e um zero significa "sem stop / sem alvo" — o
+        que a variante A e B pedem explicitamente.
         """
         decision = self.strategy.generate_signal(features)
         if decision.signal in ("BUY", "SELL"):
-            sl_points, sl = self.strategy.initial_sl(
-                current_price=price,
-                atr14=float(features.atr14[-1]),
-                period_smooth=float(features.period_smooth[-1]),
-                direction=decision.signal,
-            )
+            variant = self.variant
+            if variant is not None:
+                # `*_points` das variantes sao PONTOS (1 pt = 0,01 USD) e o
+                # preco do alvo/stop precisa da conversao. Sem ela, "TP de
+                # 50 pontos" viraria alvo a +50,00 USD.
+                sl_points = variant.sl_points if variant.use_sl else 0.0
+                sl_dist = sl_points * POINTS_TO_PRICE
+                sl = (
+                    price - sl_dist if decision.signal == "BUY"
+                    else price + sl_dist
+                ) if sl_dist > 0 else 0.0
+                tp_points = variant.tp_points if variant.use_tp else 0.0
+                tp_dist = tp_points * POINTS_TO_PRICE
+                tp = (
+                    price + tp_dist if decision.signal == "BUY"
+                    else price - tp_dist
+                ) if tp_dist > 0 else 0.0
+            else:
+                sl_points, sl = self.strategy.initial_sl(
+                    current_price=price,
+                    atr14=float(features.atr14[-1]),
+                    period_smooth=float(features.period_smooth[-1]),
+                    direction=decision.signal,
+                )
+                tp_points, tp = 0.0, 0.0
             decision.sl_points = sl_points
             decision.initial_sl = sl
+            decision.tp_points = tp_points
+            decision.tp = tp
             decision.price = price
             decision.symbol = symbol
         return decision
@@ -375,18 +439,34 @@ class BacktestEngine:
         Recebe as MESMAS features já computadas para a barra atual — a janela
         é o passado para as duas decisões, então recalcular só dobraria o
         custo do backtest sem mudar o resultado.
+
+        A guarda `sl_points <= 0` aborta a entrada quando o motor nao emite
+        stop. Ela existe para o V26, cujo SL e obrigatorio. Numa variante sem
+        SL (`wce_quadrant`, `wce_quadrant_tp`) abortar aqui produziria ZERO
+        trades — o oposto do que a variante mede — entao a guarda so vale
+        para quem precisa de stop. Onde `sl == 0.0` significa "sem stop".
         """
         decision = self._entry_decision(features, symbol, price)
         if decision is None or decision.signal not in ("BUY", "SELL"):
             return
-        if decision.sl_points <= 0:
+        if decision.sl_points <= 0 and self.variant is None:
             return
 
-        sl = float(decision.initial_sl) or (
-            price - decision.sl_points
-            if decision.signal == "BUY"
-            else price + decision.sl_points
-        )
+        sl_points = float(decision.sl_points)
+        if sl_points > 0:
+            # `initial_sl` manda quando o motor ja calculou o preco do stop; o
+            # `or` abaixo so refaz o preco a partir dos pontos quando ele nao
+            # veio. A guarda `sl_points > 0` e obrigatoria antes do `or`: sem
+            # ela, uma variante sem SL cairia no lado direito da conta e
+            # receberia um stop no PRECO (atingido na mesma barra).
+            sl = float(decision.initial_sl) or (
+                price - sl_points
+                if decision.signal == "BUY"
+                else price + sl_points
+            )
+        else:
+            sl = 0.0  # 0.0 = sem stop, e nao "stop no preco"
+        tp = float(getattr(decision, "tp", 0.0) or 0.0)
 
         self._ticket += 1
         self.open_trade = Trade(
@@ -395,7 +475,9 @@ class BacktestEngine:
             direction=decision.signal,
             volume=self.settings.min_volume,
             sl=sl,
-            sl_points=float(decision.sl_points),
+            sl_points=sl_points,
+            tp=tp or None,
+            tp_points=float(getattr(decision, "tp_points", 0.0) or 0.0),
         )
         # `entry_phase` é lido pelo V26 para a saída por inversão de fase.
         self.position = Position(
@@ -405,22 +487,40 @@ class BacktestEngine:
             volume=self.settings.min_volume,
             open_price=price,
             sl=sl,
+            tp=tp or None,
             open_time=when,
             entry_phase=float(features.phase[-1]),
         )
-        logger.debug("Aberto {} @ {} SL {}", decision.signal, price, sl)
+        logger.debug("Aberto {} @ {} SL {} TP {}", decision.signal, price, sl, tp)
 
     # --- gestão e saída ----------------------------------------------------
 
     def _stop_hit(self, bar) -> bool:
-        """O preço da barra alcançou o SL vigente?"""
-        if self.open_trade is None:
+        """O preço da barra alcançou o SL vigente?
+
+        `sl == 0.0` significa "sem stop" (variantes WCE sem guardrail) e
+        NUNCA pode ser comparado com o preço: num XAU a 3 000, `low <= 0.0` é
+        falso, mas a guarda explicita evita depender desse acidente — e numa
+        variante cujo sl é 0 o trade precisa atravessar o ciclo do Hilbert.
+        """
+        if self.open_trade is None or self.open_trade.sl <= 0.0:
             return False
         low, high = float(bar["low"]), float(bar["high"])
         return (
             low <= self.open_trade.sl
             if self.open_trade.direction == "BUY"
             else high >= self.open_trade.sl
+        )
+
+    def _target_hit(self, bar) -> bool:
+        """O preço da barra alcançou o TP vigente? (`tp is None` = sem alvo.)"""
+        if self.open_trade is None or not self.open_trade.tp:
+            return False
+        low, high = float(bar["low"]), float(bar["high"])
+        return (
+            high >= self.open_trade.tp
+            if self.open_trade.direction == "BUY"
+            else low <= self.open_trade.tp
         )
 
     def _exit_reason(self) -> str:
@@ -570,8 +670,12 @@ def main() -> int:
     parser.add_argument("--symbol", default="XAUUSD-VIP")
     parser.add_argument("--balance", type=float, default=10_000.0)
     parser.add_argument("--limit", type=int, default=0, help="Usa apenas as N barras mais recentes")
-    parser.add_argument("--model", default=None, choices=["v26", "wce"],
-                        help="Modelo; sem ele usa settings.active_model")
+    parser.add_argument("--model", default=None,
+                        choices=["v26", "wce", *WCE_VARIANTS],
+                        help="Modelo; sem ele usa settings.active_model. "
+                             "As variantes wce_quadrant* removem o guardrail "
+                             "de SL e/ou acrescentam TP/SL fixos — ver "
+                             "WCE_VARIANTS no engine.py")
     parser.add_argument("--with-costs", dest="with_costs", action=argparse.BooleanOptionalAction,
                         default=True, help="Cobrar spread+slippage+comissao (default: sim)")
     parser.add_argument("--spread", type=float, default=None,
@@ -607,14 +711,17 @@ def main() -> int:
     else:
         print("Custos       DESLIGADOS (--no-with-costs) — resultado NAO reproduzivel ao vivo")
 
-    result = BacktestEngine(
+    engine = BacktestEngine(
         initial_balance=args.balance, model=args.model, costs=costs
-    ).run(df, symbol=args.symbol)
+    )
+    result = engine.run(df, symbol=args.symbol)
     metrics = compute_metrics(result.to_dict())
 
     print(f"Modelo       {result.model}")
+    if engine.variant is not None:
+        print(f"Variante     {engine.variant.description}")
     print(f"Periodo      {result.start_date} a {result.end_date}")
-    print(f"Barrows       {len(df)} (processadas {result.bars_processed}, puladas {result.bars_skipped})")
+    print(f"Barras       {len(df)} (processadas {result.bars_processed}, puladas {result.bars_skipped})")
     print(f"Trades       {metrics['total_trades']}")
     print(f"Win rate     {metrics['win_rate_pct']:.1f}%")
     print(f"Profit fact  {metrics['profit_factor']:.3f}")
@@ -625,9 +732,11 @@ def main() -> int:
     print(f"Custo total  {result.total_costs:.2f} USD "
           f"({result.total_costs / max(1, metrics['total_trades']):.4f} USD/trade)")
 
-    sls = [t.sl_points for t in result.trades]
+    sls = [t.sl_points for t in result.trades if t.sl_points > 0]
     if sls:
         print(f"SL medio     {sum(sls) / len(sls):.2f} pontos  (min {min(sls):.2f}, max {max(sls):.2f})")
+    else:
+        print("SL medio     n/a (variante sem stop)")
     reasons: dict[str, int] = {}
     for t in result.trades:
         reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
@@ -635,7 +744,13 @@ def main() -> int:
 
     payload = result.to_dict()
     sufixo = "custos" if args.with_costs else "sem_custos"
-    out_dir = Path("backtest/reports") / f"{result.model}_{sufixo}"
+    # As variantes WCE sao um conjunto de pesquisa que se compara ENTRE SI
+    # (mesmo periodo, mesmos custos, uma variable por vez). Espalhar cada uma
+    # em `wce_quadrant_custos/`, `wce_quadrant_tp_custos/`... esconderia essa
+    # comparacao; vao todas para a mesma pasta, que ja traz o modelo no nome
+    # do arquivo.
+    raiz = Path("backtest/reports/wce_variants" if engine.variant else "backtest/reports")
+    out_dir = raiz if engine.variant else raiz / f"{result.model}_{sufixo}"
     path = save_report(payload, output_dir=out_dir)
     print(f"Relatorio    {out_dir}")
     return 0

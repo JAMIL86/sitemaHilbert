@@ -656,3 +656,197 @@ próprios (`backtest/reports/v26_custos/`, `wce_custos/`) e a baseline
 Com spread medido de 0,34 (não o fallback de 0,15) o V26 cai de PF 0,929 para
 0,795. Qualquer conclusão anterior que cite 0,929 **não inclui custos** e
 precisa ser lida assim.
+
+---
+
+## 14. Variantes WCE medidas — o "+$953,52" era survivorship bias (2026-09-27)
+
+### 14.1 O achado anterior estava errado
+
+`docs/wce2014_source_of_truth.md` §3.2 e §5 afirmavam que "sem o guardrail o
+WCE original seria lucrativo (+$953,52)". **Isso não se sustenta.** O número
+foi obtido *filtrando* os trades perdedores do stop (165 SL, −1.221,62) dos 729
+restantes (+953,52) e somando os sobreviventes — preservando a ordem temporal,
+mas com a decisão de manter o trade tomada *depois* de ver o resultado. Isso é
+survivorship bias: não é uma estratégia executável, é uma seleção sobre uma
+série já fechada.
+
+A variante A real (`--model wce_quadrant`, sem SL e sem TP, saída só por
+travessia de quadrante) foi rodada sobre os mesmos 35.359 barras, com custos:
+
+| Métrica | A: Quadrant (puro) | `wce` (com guardrail) |
+|---|---:|---:|
+| Trades | 894 | 894 |
+| Win rate | 44,4% | 42,6% |
+| Profit factor | **0,887** | 0,88 |
+| P&L | **−257,81** | −268,10 |
+| Max drawdown | 3,59% | 2,96% |
+| Sharpe | **−1,699** | −1,95 |
+
+Tirar o stop **não** recupera os 953. O total fica praticamente igual (a
+diferença de 10,29 é a mudança de uma handful de saídas). O guardrail do V26
+**não** estava destruindo o WCE: ele estava apenas rearranjando quem saía
+quando. O §13.6 deste arquivo erra ao atribuir a −1.221 ao "stop emprestado" —
+esse número é a subtração manual de dois subconjuntos escolhidos a posteriori.
+
+### 14.2 Por que o WCE puro não sobe
+
+O gate `if self.open_trade is None` impede abrir enquanto há posição. Sem
+guardrail, cada trade fica aberto até o quadrante virar, o que consome a janela
+e suprime entradas seguintes. A sequência de 894 sinais é a mesma com e sem
+stop (o guardrail nunca matou uma entrada que a lógica pura não teria tomado),
+mas o *caminho* difere.
+
+### 14.3 TP=500 não disparava — e a causa NÃO era geometria (ver §14.6)
+
+`wce_quadrant_tp` (TP fixo de 500 pts) rodou e saiu **byte-idêntico** à
+variante A: 894 trades, PF 0,887, −257,81, e `Saidas: {'QUADRANT': 894}` —
+**zero** trades encerrados por TP.
+
+**A explicação que escrevi aqui inicialmente estava errada.** Eu havia
+concluído que 500 pts era geometricamente inalcançável, e o número que usei
+para sustentar isso era a entrada 4617,50 do *primeiro trade* somada a 500.
+Um único trade não estabelece uma impossibilidade. Verificado contra o
+dataset inteiro: a mediana de close é 4393,66, e 4393,66 + 5,00 USD cabe
+folgadamente no máximo de 4889,35. A premissa não se sustentava.
+
+A causa real está em §14.6: era um bug de **unidade**, não de mercado.
+A seção fica aqui porque o sintoma (zero TPs) foi o que abriu a
+investigação, mas a conclusão correta é a da §14.6.
+
+### 14.4 Próximo passo (executado — ver §14.6)
+
+Reescalar o TP de 500 → **50 pontos** (0,50 USD). Variante C mantém SL fixo de
+250 pts (2,50 USD) para isolar o efeito do stop sem confundir com a fórmula
+ATR do V26.
+
+Relatórios em `backtest/reports/wce_variants/`.
+
+### 14.5 Estado do mercado nesta janela
+
+V26 e WCE **puros** perdem dinheiro com custos medidos (PF 0,795 e 0,887). Não
+há edge no conjunto atual. Qualquer promoção de variante exigiria PF > 1 com
+custos, o que nenhuma das três atingiu.
+
+
+### 14.6 Causa raiz: `*_points` somado ao preço como se fosse USD
+
+**O que estava errado.** O campo se chamava `tp_points`/`sl_points` e a
+docstring dizia "1 pt = 0,01 USD no XAUUSD-VIP", mas o código fazia:
+
+```python
+tp = price + tp_points      # 50.0 somado a 4617.5 -> alvo a +50,00 USD
+```
+
+Sem a conversão. Um "TP de 50 pontos" virava **alvo a +50,00 USD** — 100x
+distante do pretendido (0,50 USD) e ~11x a amplitude mediana de uma barra M5
+(4,34 USD). Nenhum TP podia disparar. O mesmo valia para o SL: "250 pontos"
+virava stop a 250,00 USD.
+
+**Por que enganou durante duas rodadas.** O sintoma (zero TPs) é
+*idêntico* ao de um alvo geometricamente distante, e as duas explicações
+são ambas plausíveis olhando só o relatório. Cheguei a "TP=500 é
+impossível" por uma vía errada: somei 500 à entrada de um trade e comparei
+com o máximo do dataset. Um trade não prova impossibilidade — a mediana de
+close + 5,00 USD cabe folgadamente. O que quebrou a ambiguidade foi o
+`test_tp_de_500...` falhando com o número real ao lado, e depois o smoke
+test mostrar **1 TP em 190 trades com alvo de 0,50 USD** — geométrica
+impossível não é 1/190.
+
+**Por que a unidade ficou ambígua desde o começo.** O V26 usa o mesmo nome
+para a mesma ideia, e também não converte: `calculate_initial_sl` faz
+`current_price - sl_points` direto (`strategy/pdf_strategies.py:270`).
+Medido: `sl_points` mediano 10,09 com distância real entrada→stop de 3,62
+USD. Ou seja, **o `sl_points` do V26 é um delta em USD apesar do nome** —
+a unidade "pontos" é uma fantasia que os dois lados herdaram. Não foi
+corrigido no V26 (mudaria o comportamento de um sistema já medido); foi
+corrigido só nas variantes, que são novas e não têm número publicado.
+
+**Correção.** `POINTS_TO_PRICE = 0.01` em `backtest/engine.py`, aplicado
+em `_entry_wce` ao converter `*_points` da variante em preço. Documentado
+no `WCEVariant` para que o próximo que mexer aqui não reintroduza.
+
+**Verificado após a correção** (slice real de 5.000 barras, sem custos):
+
+| Variante | Trades | Saídas |
+|---|---:|---|
+| `wce_quadrant` (A) | 107 | `{'QUADRANT': 107}` |
+| `wce_quadrant_tp` (B) | 107 | `{'TP': 98, 'QUADRANT': 9}` |
+| `wce_quadrant_tp_sl` (C) | 107 | `{'TP': 55, 'SL': 52}` |
+
+Primeiro trade: entrada 4617,50, TP 4618,00 (+0,50 exato), SL 4615,00
+(−2,50 exato).
+
+**Testes.** `tests/test_wce_variants.py`, 9 testes, todos verdes em 7m33s.
+Três lições que eles carregam:
+
+1. **Fixture sintetica nao serve para estrategia de quadrante.** Dente-de-serra
+   e aleatorio nao produzem travessia de quadrante do Hilbert: as variantes
+   devolviam **0 trades** e os testes "passavam" por vacuuo, sem exercitar
+   nada. Trocado por slice real de 5.000 barras (~107 entradas, ~15 s por
+   engine).
+2. **O teste do TP exige que ele DISPARE, nao so que exista.** `assert tp is
+   not None` passava com o alvo a +50,00 USD. O que pega a regressão e
+   `assert any(t.exit_reason == "TP")` mais a checagem de distância de
+   0,50 USD em cada trade.
+3. **O teste da unidade foi reescrito com a premissa certa.** O original
+   afirmava que 500 pts era inalcançável — e estava errado, do jeito que o
+   §14.3 original estava. Agora trava a relação
+   `50.0 * POINTS_TO_PRICE == 0.50` e que 0,50 < amplitude mediana < 50,00.
+
+### 14.7 Resultado medido das três variantes (com custos, 35.359 barras)
+
+Todos os relatórios em `backtest/reports/wce_variants/`. As três variantes
+têm **exatamente os mesmos 894 trades** — diferem só em como saem. Isso
+torna a comparação pareada: a diferença de P&L é atribuível ao parâmetro
+de saída, e a nada mais.
+
+| Variante | Trades | WR | PF | P&L | MaxDD | Sharpe | Saídas |
+|---|---:|---:|---:|---:|---:|---:|---|
+| V26 (baseline) | 1746 | 37,7% | 0,795 | −891,61 | 9,66% | −4,58 | SL/TRAIL |
+| `wce` (guardrail) | 894 | 42,6% | 0,880 | −268,10 | 2,96% | −1,95 | QUADRANT+SL |
+| **A** artigo puro | 894 | 44,4% | **0,887** | **−257,81** | 3,59% | −1,70 | `{QUADRANT: 894}` |
+| **B** +TP 50 | 894 | 89,5% | 0,243 | −374,05 | 3,75% | −8,58 | `{TP: 800, QUADRANT: 94}` |
+| **C** +TP 50 +SL 250 | 894 | 60,2% | 0,081 | −916,00 | 9,16% | −30,09 | `{SL: 344, TP: 538, QUADRANT: 12}` |
+
+**Nenhuma atinge PF > 1,0. A melhor é a que não tem nada além do artigo.**
+
+#### Por que o TP de 50 pontos piora (a armadilha do WR alto)
+
+B tem **89,5% de acerto** e PF 0,243. Win rate altíssimo com PF péssimo
+significa vencedores minúsculos contra perdedores grandes. A conta:
+
+- custo medido: 0,35 USD/trade (spread 0,34 + slippage 1 pt)
+- alvo: 50 pts = 0,50 USD brutos → **0,15 USD líquido por vitória**
+- 89,5% de acerto sobre 0,15 USD não cobre nem o custo do que perdeu
+
+Ou seja, **o alvo de 50 pontos é MENOR que o custo de round-trip (0,35 USD)**.
+Enquanto TP ≤ 35 pts, acrescentar take profit a esta estratégia é
+matematicamente incapaz de produzir lucro, qualquer que seja o win rate.
+Não é defeito do WCE nem da implementação: é propriedade do símbolo e do
+custo medido.
+
+O efeito mecânico: A não tem alvo, e o quadrant-exit deixava o trade correr
+(é por isso que A tem WR de só 44,4% e mesmo assim o melhor PF — assimetria
+favorável). Fixar alvo em 0,50 USD **trunca a cauda direita** que fazia A
+menos ruim, e converte todo aquele upside em média-zero. O TP funcionou
+mecanicamente (800 de 894 encerraram no alvo) — o problema é o nível, não
+o mecanismo.
+
+#### Por que o SL de 250 mata C
+
+C é assimétrico na direção errada: risco 2,50 USD contra ganho 0,50 USD, um
+ratio de 5:1. Precisaria acertar **83,3%** das vezes para empatar; acerta
+**60,2%**. Resultado: PF 0,081 e o pior Sharpe da tabela (−30,09). O SL de
+2,50 USD também é comparável ao alcance típico de um ciclo Hilbert, então
+mata a posição antes que o quadrante decida — resta 12 saídas por quadrante
+contra 894 em A.
+
+#### Leitura
+
+O gradiente é monotônico e na direção esperada: **cada parâmetro acrescentado
+piora**. A (PF 0,887) → B (0,243) → C (0,081). Nenhum deles é edge; são três
+formas de tornear o mesmo mercado sem braço. A conclusão da §14.5 se
+confirma com mais força: nesta janela, com estes custos, não há edge no
+conjunto — e o take profit é a mudança que mais destrói valor, porque opera
+abaixo do custo de transação.

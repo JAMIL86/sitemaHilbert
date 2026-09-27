@@ -97,6 +97,12 @@ class SignalDecision:
     price: float
     sl_points: float
     initial_sl: float
+    # Take profit em PRECO e em PONTOS. 0.0 = sem take profit. Nenhum PDF do
+    # projeto define TP fixo (V26: "SEM Take Profit fixo"; WCE 2014: nao
+    # escreve nenhum), entao o default 0.0 mantem os dois motores inalterados
+    # e so as variantes de pesquisa preenchem isto.
+    tp_points: float = 0.0
+    tp: float = 0.0
     reasons: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
